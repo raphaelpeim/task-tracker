@@ -1,0 +1,94 @@
+# ===================================
+# macOS
+# ===================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+
+# ===================================
+# Editor / IDE
+# ===================================
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/*
+!.vscode/extensions.json
+
+# Visual Studio (si jamais utilisé)
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+
+# ===================================
+# Client (React / Node / Vite)
+# ===================================
+client/node_modules/
+client/dist/
+client/dist-ssr/
+client/*.local
+
+# Logs
+client/logs/
+client/*.log
+client/npm-debug.log*
+client/yarn-debug.log*
+client/yarn-error.log*
+client/pnpm-debug.log*
+client/lerna-debug.log*
+
+
+# ===================================
+# Server (Java / Maven)
+# ===================================
+server/target/
+!server/**/src/main/**/target/
+!server/**/src/test/**/target/
+
+server/.mvn/wrapper/maven-wrapper.jar
+
+# STS (Spring Tool Suite)
+server/.apt_generated/
+server/.classpath
+server/.factorypath
+server/.project
+server/.settings/
+server/.springBeans
+server/.sts4-cache/
+
+# NetBeans
+server/nbproject/private/
+server/nbbuild/
+server/dist/
+server/nbdist/
+server/.nb-gradle/
+
+# Build générique (Gradle ou autre)
+server/build/
+!server/**/src/main/**/build/
+!server/**/src/test/**/build/
+
+# Logs
+server/*.log
+
+
+# ===================================
+# Divers / Sécurité (racine)
+# ===================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
