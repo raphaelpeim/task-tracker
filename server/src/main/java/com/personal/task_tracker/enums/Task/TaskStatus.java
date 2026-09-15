@@ -1,6 +1,6 @@
-package com.personal.task_tracker.models.enums;
+package com.personal.task_tracker.enums.Task;
 
-public enum Status {
+public enum TaskStatus {
     BACKLOG,
     READY,
     IN_PROGRESS,

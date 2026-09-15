@@ -1,11 +1,11 @@
-import com.personal.task_tracker.models.enums.Priority;
-import com.personal.task_tracker.models.enums.Status;
-import com.personal.task_tracker.models.enums.Type;
+package com.personal.task_tracker.entities;
+
+import com.personal.task_tracker.enums.Task.TaskPriority;
+import com.personal.task_tracker.enums.Task.TaskStatus;
+import com.personal.task_tracker.enums.Task.TaskType;
 import jakarta.persistence.*;
 import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.UpdateTimestamp;
-import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
 
@@ -22,19 +22,16 @@ public class Task {
 	private String description;
 
 	@Enumerated(EnumType.STRING)
-	@JdbcTypeCode(SqlTypes.NAMED_ENUM)
-	@Column(name="type", length=9, nullable=false)
-	private Type type;
+	@Column(name="type", length=10, nullable=false)
+	private TaskType type;
 
 	@Enumerated(EnumType.STRING)
-	@JdbcTypeCode(SqlTypes.NAMED_ENUM)
-	@Column(name="status", length=11, nullable=false)
-	private Status status;
+	@Column(name="status", length=20, nullable=false)
+	private TaskStatus status;
 
 	@Enumerated(EnumType.STRING)
-	@JdbcTypeCode(SqlTypes.NAMED_ENUM)
-	@Column(name="priority", length=8, nullable=false)
-	private Priority priority;
+	@Column(name="priority", length=10, nullable=false)
+	private TaskPriority priority;
 
 	@Column(name="assignee", length=50)
 	private String assignee; // TODO Link with User table
