@@ -54,10 +54,10 @@ client/lerna-debug.log*
 # Server (Java / Maven)
 # ===================================
 server/target/
+server/.mvn/wrapper/maven-wrapper.jar
+server/src/main/resources/application-*.properties
 !server/**/src/main/**/target/
 !server/**/src/test/**/target/
-
-server/.mvn/wrapper/maven-wrapper.jar
 
 # STS (Spring Tool Suite)
 server/.apt_generated/
@@ -92,3 +92,4 @@ server/*.log
 .env.*.local
 *.pem
 *.key
+docker-compose.override.yml
