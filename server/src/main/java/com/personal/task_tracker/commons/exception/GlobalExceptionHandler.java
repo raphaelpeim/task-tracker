@@ -1,5 +1,9 @@
 package com.personal.task_tracker.commons.exception;
 
+import com.personal.task_tracker.task.dto.TaskRequestDto;
+import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
+import com.personal.task_tracker.task.exception.TaskNotFoundException;
+import com.personal.task_tracker.user.exception.UserNotFoundException;
 import jakarta.validation.ConstraintViolation;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
@@ -32,7 +36,10 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	private static final List<String> CONSTRAINT_PRIORITY = List.of("NotNull", "NotBlank", "Size", "MaxBytes", "Email");
 	static final String INVALID_FORMAT = "invalidFormat";
 	static final ResourceBundle MESSAGES = ResourceBundle.getBundle("ValidationMessages");
-	static final Map<Class<?>, String> DOMAINS = Map.of();
+	static final Map<Class<?>, String> DOMAINS = Map.of(
+			TaskRequestDto.class, "task",
+			TaskRequestPartialDto.class, "task"
+	);
 
 	// REQUESTS
 
@@ -182,6 +189,20 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
 	static ProblemDetail forbidden() {
 		return problem(HttpStatus.FORBIDDEN, "request.forbidden", "Access is denied");
+	}
+
+	// USERS
+
+	@ExceptionHandler(UserNotFoundException.class)
+	public ProblemDetail handleUserNotFound(UserNotFoundException ex) {
+		return problem(HttpStatus.NOT_FOUND, "user.notFound", ex.getMessage());
+	}
+
+	// TASKS
+
+	@ExceptionHandler(TaskNotFoundException.class)
+	public ProblemDetail handleTaskNotFound(TaskNotFoundException ex) {
+		return problem(HttpStatus.NOT_FOUND, "task.notFound", ex.getMessage());
 	}
 
 	// UNEXPECTED
