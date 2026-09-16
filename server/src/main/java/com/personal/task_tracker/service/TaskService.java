@@ -1,6 +1,5 @@
 package com.personal.task_tracker.service;
 
-import com.personal.task_tracker.dto.Task.CreateTaskDto;
 import com.personal.task_tracker.exception.TaskNotFoundException;
 import com.personal.task_tracker.entity.Task;
 import com.personal.task_tracker.repository.TaskRepository;
@@ -35,12 +34,10 @@ public class TaskService {
 
 	/**
 	 * Create a task
-	 * @param createTaskDto values of the new task
+	 * @param task the new task to create
 	 * @return the created new task
 	 */
-	public Task createTask(CreateTaskDto createTaskDto) {
-		Task task = new Task(createTaskDto);
-
+	public Task createTask(Task task) {
 		return taskRepository.save(task);
 	}
 }

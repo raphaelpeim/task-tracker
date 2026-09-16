@@ -1,6 +1,6 @@
 package com.personal.task_tracker.entity;
 
-import com.personal.task_tracker.dto.Task.CreateTaskDto;
+import com.personal.task_tracker.dto.task.CreateTaskDto;
 import com.personal.task_tracker.enums.Task.TaskPriority;
 import com.personal.task_tracker.enums.Task.TaskStatus;
 import com.personal.task_tracker.enums.Task.TaskType;
@@ -45,17 +45,17 @@ public class Task {
 	@Column(name="updated_date")
 	private LocalDateTime updatedDate;
 
-	public Task(CreateTaskDto createTaskDto) {
-		this.title = createTaskDto.title();
-		this.description = createTaskDto.description();
-		this.type = createTaskDto.type();
-		this.status = createTaskDto.status();
-		this.priority = createTaskDto.priority();
-		this.assignee = createTaskDto.assignee();
+	protected Task() {
+
 	}
 
-	public Task() {
-
+	public Task(String title, String description, TaskType type, TaskStatus status, TaskPriority priority, String assignee) {
+		this.title = title;
+		this.description = description;
+		this.type = type;
+		this.status = status;
+		this.priority = priority;
+		this.assignee = assignee;
 	}
 
 	public Long getId() {

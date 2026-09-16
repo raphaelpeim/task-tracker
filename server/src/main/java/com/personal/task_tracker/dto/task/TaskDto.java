@@ -1,6 +1,5 @@
-package com.personal.task_tracker.dto.Task;
+package com.personal.task_tracker.dto.task;
 
-import com.personal.task_tracker.entity.Task;
 import com.personal.task_tracker.enums.Task.TaskPriority;
 import com.personal.task_tracker.enums.Task.TaskStatus;
 import com.personal.task_tracker.enums.Task.TaskType;
@@ -18,18 +17,4 @@ public record TaskDto(
 		LocalDateTime createdDate,
 		LocalDateTime updatedDate
 ) {
-
-	public TaskDto(Task task) {
-		this(
-				task.getId(),
-				task.getTitle(),
-				task.getDescription(),
-				task.getType(),
-				task.getStatus(),
-				task.getPriority(),
-				task.getAssignee(),
-				task.getCreatedDate(),
-				task.getUpdatedDate()
-		);
-	}
 }

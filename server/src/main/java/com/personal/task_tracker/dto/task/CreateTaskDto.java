@@ -1,4 +1,4 @@
-package com.personal.task_tracker.dto.Task;
+package com.personal.task_tracker.dto.task;
 
 import com.personal.task_tracker.enums.Task.TaskPriority;
 import com.personal.task_tracker.enums.Task.TaskStatus;
