@@ -1,6 +1,5 @@
 package com.personal.task_tracker.entity;
 
-import com.personal.task_tracker.dto.task.CreateTaskDto;
 import com.personal.task_tracker.enums.Task.TaskPriority;
 import com.personal.task_tracker.enums.Task.TaskStatus;
 import com.personal.task_tracker.enums.Task.TaskType;

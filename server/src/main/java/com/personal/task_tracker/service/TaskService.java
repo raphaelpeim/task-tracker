@@ -1,5 +1,6 @@
 package com.personal.task_tracker.service;
 
+import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
 import com.personal.task_tracker.exception.TaskNotFoundException;
 import com.personal.task_tracker.entity.Task;
 import com.personal.task_tracker.repository.TaskRepository;
@@ -39,5 +40,38 @@ public class TaskService {
 	 */
 	public Task createTask(Task task) {
 		return taskRepository.save(task);
+	}
+
+	/**
+	 * Update a task
+	 * @param id Id of the task to update
+	 * @param task The task with the new values
+	 * @return the updated task
+	 */
+	public Task updateTask(Long id, Task task) {
+		Task taskToUpdate = getTaskById(id);
+
+		taskToUpdate.setTitle(task.getTitle());
+		taskToUpdate.setDescription(task.getDescription());
+		taskToUpdate.setType(task.getType());
+		taskToUpdate.setStatus(task.getStatus());
+		taskToUpdate.setPriority(task.getPriority());
+		taskToUpdate.setAssignee(task.getAssignee());
+
+		return taskRepository.save(taskToUpdate);
+	}
+
+	/**
+	 * Update partially a task
+	 * @param id Id of the task to update
+	 * @param task The task with the new values
+	 * @return the updated task
+	 */
+	public Task updateTaskPartial(Long id, TaskRequestPartialDto task) {
+		Task taskToUpdate = getTaskById(id);
+
+		// TODO
+
+		return taskRepository.save(taskToUpdate);
 	}
 }

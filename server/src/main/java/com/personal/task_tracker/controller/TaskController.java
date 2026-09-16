@@ -1,7 +1,7 @@
 package com.personal.task_tracker.controller;
 
-import com.personal.task_tracker.dto.task.CreateTaskDto;
-import com.personal.task_tracker.dto.task.TaskDto;
+import com.personal.task_tracker.dto.task.TaskRequestDto;
+import com.personal.task_tracker.dto.task.TaskResponseDto;
 import com.personal.task_tracker.entity.Task;
 import com.personal.task_tracker.mapper.TaskMapper;
 import com.personal.task_tracker.service.TaskService;
@@ -22,25 +22,25 @@ public class TaskController {
 	}
 
 	@GetMapping
-	public ResponseEntity<List<TaskDto>> getAllTasks() {
-		List<TaskDto> taskDtoList = taskService.getAllTasks().stream().map(TaskMapper::toDto).toList();
-		return new ResponseEntity<>(taskDtoList, HttpStatus.OK);
+	public ResponseEntity<List<TaskResponseDto>> getAllTasks() {
+		List<TaskResponseDto> taskResponseDtoList = taskService.getAllTasks().stream().map(TaskMapper::toDto).toList();
+		return new ResponseEntity<>(taskResponseDtoList, HttpStatus.OK);
 	}
 
 	@GetMapping("/{taskId}")
-	public ResponseEntity<TaskDto> getTask(
+	public ResponseEntity<TaskResponseDto> getTask(
 			@PathVariable Long taskId
 	) {
-		TaskDto taskDto = TaskMapper.toDto(taskService.getTaskById(taskId));
-		return new ResponseEntity<>(taskDto, HttpStatus.OK);
+		TaskResponseDto taskResponseDto = TaskMapper.toDto(taskService.getTaskById(taskId));
+		return new ResponseEntity<>(taskResponseDto, HttpStatus.OK);
 	}
 
 	@PostMapping
-	public ResponseEntity<TaskDto> createTask(
-			@Valid @RequestBody CreateTaskDto createTaskDto
+	public ResponseEntity<TaskResponseDto> createTask(
+			@Valid @RequestBody TaskRequestDto taskRequestDto
 	) {
-		Task task = taskService.createTask(TaskMapper.toEntity(createTaskDto));
-		TaskDto taskDto = TaskMapper.toDto(task);
-		return new ResponseEntity<>(taskDto, HttpStatus.CREATED);
+		Task task = taskService.createTask(TaskMapper.toEntity(taskRequestDto));
+		TaskResponseDto taskResponseDto = TaskMapper.toDto(task);
+		return new ResponseEntity<>(taskResponseDto, HttpStatus.CREATED);
 	}
 }

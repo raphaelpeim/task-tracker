@@ -6,7 +6,7 @@ import com.personal.task_tracker.enums.Task.TaskType;
 
 import java.time.LocalDateTime;
 
-public record TaskDto(
+public record TaskResponseDto(
 		Long id,
 		String title,
 		String description,

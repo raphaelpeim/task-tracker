@@ -23,7 +23,7 @@
 - Architecture en couches : `entity/`, `dto/`, `repository/`, `service/`, `controller/`, `mapper/`, `exception/`
 - Décision d'architecture : le service ne manipule/retourne que `Task` (jamais de DTO) — le mapping DTO ↔ entité est isolé dans `TaskMapper`, pas dans le controller ni dans l'entité elle-même
 - `TaskRepository extends JpaRepository<Task, Long>` — CRUD de base, pas encore de méthode de recherche custom
-- `TaskController` avec `GET /tasks`, `GET /tasks/{id}`, `POST /tasks`, validation via Bean Validation (`@NotBlank`, `@NotNull`...) sur `CreateTaskDto`
+- `TaskController` avec `GET /tasks`, `GET /tasks/{id}`, `POST /tasks`, validation via Bean Validation (`@NotBlank`, `@NotNull`...) sur `TaskRequestDto`
 - Gestion d'erreurs centralisée via `GlobalExceptionHandler` (`@RestControllerAdvice`) : `TaskNotFoundException` → 404, erreurs de validation → 400 avec détail champ par champ
 - Décision métier : `status` reste modifiable à la création (cas d'usage board Kanban — création directe dans n'importe quelle colonne), pas de statut par défaut forcé
 

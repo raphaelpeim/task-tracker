@@ -1,14 +1,14 @@
 package com.personal.task_tracker.mapper;
 
-import com.personal.task_tracker.dto.task.CreateTaskDto;
-import com.personal.task_tracker.dto.task.TaskDto;
+import com.personal.task_tracker.dto.task.TaskRequestDto;
+import com.personal.task_tracker.dto.task.TaskResponseDto;
 import com.personal.task_tracker.entity.Task;
 
 public class TaskMapper {
 
 	private TaskMapper() {}
 
-	public static Task toEntity(CreateTaskDto dto) {
+	public static Task toEntity(TaskRequestDto dto) {
 		return new Task(
 				dto.title(),
 				dto.description(),
@@ -19,8 +19,8 @@ public class TaskMapper {
 		);
 	}
 
-	public static TaskDto toDto(Task task) {
-		return new TaskDto(
+	public static TaskResponseDto toDto(Task task) {
+		return new TaskResponseDto(
 				task.getId(),
 				task.getTitle(),
 				task.getDescription(),
