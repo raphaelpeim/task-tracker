@@ -1,6 +1,7 @@
 package com.personal.task_tracker.mapper;
 
 import com.personal.task_tracker.dto.task.TaskRequestDto;
+import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
 import com.personal.task_tracker.dto.task.TaskResponseDto;
 import com.personal.task_tracker.entity.Task;
 
@@ -31,5 +32,14 @@ public class TaskMapper {
 				task.getCreatedDate(),
 				task.getUpdatedDate()
 		);
+	}
+
+	public static void applyPartialUpdate(Task task, TaskRequestPartialDto dto) {
+		dto.title().ifPresent(task::setTitle);
+		dto.description().ifPresent(task::setDescription);
+		dto.type().ifPresent(task::setType);
+		dto.status().ifPresent(task::setStatus);
+		dto.priority().ifPresent(task::setPriority);
+		dto.assignee().ifPresent(task::setAssignee);
 	}
 }

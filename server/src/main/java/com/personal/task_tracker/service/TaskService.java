@@ -3,9 +3,11 @@ package com.personal.task_tracker.service;
 import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
 import com.personal.task_tracker.exception.TaskNotFoundException;
 import com.personal.task_tracker.entity.Task;
+import com.personal.task_tracker.mapper.TaskMapper;
 import com.personal.task_tracker.repository.TaskRepository;
 import org.springframework.stereotype.Service;
 
+import java.util.Arrays;
 import java.util.List;
 
 @Service
@@ -66,11 +68,12 @@ public class TaskService {
 	 * @param id Id of the task to update
 	 * @param task The task with the new values
 	 * @return the updated task
+	 * TODO validate dans le controller
 	 */
 	public Task updateTaskPartial(Long id, TaskRequestPartialDto task) {
 		Task taskToUpdate = getTaskById(id);
 
-		// TODO
+		TaskMapper.applyPartialUpdate(taskToUpdate, task);
 
 		return taskRepository.save(taskToUpdate);
 	}

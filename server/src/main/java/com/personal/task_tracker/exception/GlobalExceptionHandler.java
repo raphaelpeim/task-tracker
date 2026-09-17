@@ -28,4 +28,6 @@ public class GlobalExceptionHandler {
 		}
 		return new ResponseEntity<>(errors, HttpStatus.BAD_REQUEST);
 	}
+
+	// TODO IllegalArgumentException
 }
