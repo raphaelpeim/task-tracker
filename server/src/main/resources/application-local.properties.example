@@ -3,3 +3,6 @@ server.port=
 spring.datasource.url=
 spring.datasource.username=
 spring.datasource.password=
+
+spring.jpa.show-sql=
+logging.level.org.springframework.web=
