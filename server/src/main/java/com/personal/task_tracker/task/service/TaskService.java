@@ -1,10 +1,10 @@
-package com.personal.task_tracker.service;
+package com.personal.task_tracker.task.service;
 
-import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
-import com.personal.task_tracker.exception.TaskNotFoundException;
-import com.personal.task_tracker.entity.Task;
-import com.personal.task_tracker.mapper.TaskMapper;
-import com.personal.task_tracker.repository.TaskRepository;
+import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
+import com.personal.task_tracker.task.exception.TaskNotFoundException;
+import com.personal.task_tracker.task.entity.Task;
+import com.personal.task_tracker.task.mapper.TaskMapper;
+import com.personal.task_tracker.task.repository.TaskRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -78,7 +78,9 @@ public class TaskService {
 	 * @param id Id of the task to delete
 	 */
 	public void deleteTask(Long id) {
-		Task task = getTaskById(id);
-		repository.delete(task);
+		if (!repository.existsById(id)) {
+			throw new TaskNotFoundException("There is no task with id: " + id);
+		}
+		repository.deleteById(id);
 	}
 }

@@ -1,8 +1,8 @@
-package com.personal.task_tracker.dto.task;
+package com.personal.task_tracker.task.dto;
 
-import com.personal.task_tracker.enums.Task.TaskPriority;
-import com.personal.task_tracker.enums.Task.TaskStatus;
-import com.personal.task_tracker.enums.Task.TaskType;
+import com.personal.task_tracker.task.enums.TaskPriority;
+import com.personal.task_tracker.task.enums.TaskStatus;
+import com.personal.task_tracker.task.enums.TaskType;
 
 import java.time.LocalDateTime;
 

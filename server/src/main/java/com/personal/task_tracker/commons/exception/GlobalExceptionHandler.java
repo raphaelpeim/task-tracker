@@ -1,5 +1,6 @@
-package com.personal.task_tracker.exception;
+package com.personal.task_tracker.commons.exception;
 
+import com.personal.task_tracker.task.exception.TaskNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;

@@ -1,9 +1,9 @@
-package com.personal.task_tracker.mapper;
+package com.personal.task_tracker.task.mapper;
 
-import com.personal.task_tracker.dto.task.TaskRequestDto;
-import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
-import com.personal.task_tracker.dto.task.TaskResponseDto;
-import com.personal.task_tracker.entity.Task;
+import com.personal.task_tracker.task.dto.TaskRequestDto;
+import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
+import com.personal.task_tracker.task.dto.TaskResponseDto;
+import com.personal.task_tracker.task.entity.Task;
 
 public class TaskMapper {
 
