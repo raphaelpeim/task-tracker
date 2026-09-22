@@ -1,12 +1,12 @@
-package com.personal.task_tracker.controller;
+package com.personal.task_tracker.task.controller;
 
-import com.personal.task_tracker.dto.task.TaskRequestDto;
-import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
-import com.personal.task_tracker.dto.task.TaskResponseDto;
-import com.personal.task_tracker.entity.Task;
-import com.personal.task_tracker.mapper.TaskMapper;
-import com.personal.task_tracker.service.TaskService;
-import com.personal.task_tracker.validator.TaskUpdatePartialValidator;
+import com.personal.task_tracker.task.dto.TaskRequestDto;
+import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
+import com.personal.task_tracker.task.dto.TaskResponseDto;
+import com.personal.task_tracker.task.entity.Task;
+import com.personal.task_tracker.task.mapper.TaskMapper;
+import com.personal.task_tracker.task.service.TaskService;
+import com.personal.task_tracker.task.validator.TaskUpdatePartialValidator;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

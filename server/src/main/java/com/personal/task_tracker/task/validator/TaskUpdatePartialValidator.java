@@ -1,6 +1,6 @@
-package com.personal.task_tracker.validator;
+package com.personal.task_tracker.task.validator;
 
-import com.personal.task_tracker.dto.task.TaskRequestPartialDto;
+import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
 
 public class TaskUpdatePartialValidator {
 
@@ -20,6 +20,6 @@ public class TaskUpdatePartialValidator {
 		if (dto.priority().isPresent() && dto.priority().get() == null) {
 			throw new IllegalArgumentException("priority cannot be null");
 		}
-		// TODO assignee
+		// assignee : pas de vérification — un null explicite est autorisé
 	}
 }

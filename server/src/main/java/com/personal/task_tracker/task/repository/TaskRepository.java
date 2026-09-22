@@ -1,7 +1,7 @@
-package com.personal.task_tracker.repository;
+package com.personal.task_tracker.task.repository;
 
-import com.personal.task_tracker.entity.Task;
-import com.personal.task_tracker.enums.Task.TaskStatus;
+import com.personal.task_tracker.task.entity.Task;
+import com.personal.task_tracker.task.enums.TaskStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;

@@ -27,6 +27,13 @@
 - Gestion d'erreurs centralisée via `GlobalExceptionHandler` (`@RestControllerAdvice`) : `TaskNotFoundException` → 404, erreurs de validation → 400 avec détail champ par champ
 - Décision métier : `status` reste modifiable à la création (cas d'usage board Kanban — création directe dans n'importe quelle colonne), pas de statut par défaut forcé
 
+## [18-21/09/2026] — Réorganisation par domaine & sécurité temporaire
+- Réorganisation de l'arborescence : de "couches techniques à plat" vers "package par domaine avec sous-dossiers techniques à l'intérieur" (`task/controller`, `task/dto`, `task/entity`...), plus lisible et prêt à accueillir de futurs domaines (`project`, `user`...)
+- `commons/` créé pour ce qui est réellement transverse : `config/` (Security, Jackson), `exception/GlobalExceptionHandler`
+- Règle actée : un fichier isolé garde son propre sous-dossier même seul, pour la cohérence entre domaines présents et futurs
+- Sécurité désactivée volontairement et temporairement (`SecurityConfig` avec `permitAll()` sur tous les endpoints, CSRF désactivé) — à réactiver proprement à l'étape JWT prévue dans la roadmap
+- `GlobalExceptionHandler` enrichi : `IllegalArgumentException` (validation métier custom) et `HttpMessageNotReadableException` (JSON malformé / valeur d'enum invalide) en plus de `TaskNotFoundException` et `MethodArgumentNotValidException`
+
 ## [21-23/09/2026] — CRUD complet (PUT, PATCH, DELETE) & PATCH partiel
 - `PUT /tasks/{id}` (remplacement complet) et `DELETE /tasks/{id}` (204 No Content) ajoutés
 - `PATCH /tasks/{id}` pour mise à jour partielle, avec `TaskRequestPartialDto` utilisant `JsonNullable<T>` (lib `org.openapitools:jackson-databind-nullable`) pour distinguer champ absent / présent à null / présent avec valeur

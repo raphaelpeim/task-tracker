@@ -1,5 +1,6 @@
-package com.personal.task_tracker.exception;
+package com.personal.task_tracker.commons.exception;
 
+import com.personal.task_tracker.task.exception.TaskNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -36,7 +37,7 @@ public class GlobalExceptionHandler {
 	}
 
 	@ExceptionHandler(HttpMessageNotReadableException.class)
-	public ResponseEntity<Map<String, String>> handleUnreadableBody(HttpMessageNotReadableException ex) {
+	public ResponseEntity<Map<String, String>> handleUnreadableBody() {
 		return new ResponseEntity<>(
 				Map.of("error", "The request body is wrong or contains an invalid value"),
 				HttpStatus.BAD_REQUEST
