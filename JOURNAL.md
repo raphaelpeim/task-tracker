@@ -42,7 +42,16 @@
 - Découverte : Spring Boot auto-détecte les modules Jackson via `ServiceLoader` — le `@Bean JsonNullableModule` manuel dans `JacksonConfig` était devenu redondant et a été supprimé
 - Décision métier tranchée : `status` reste éditable librement à la création et via PATCH (cas d'usage board Kanban, création directe dans n'importe quelle colonne) — les transitions contrôlées de statut, si besoin un jour, se géreraient uniquement en update, jamais en création
 
+## [23/09/2026] — Tests d'intégration avec Testcontainers
+- Ajout de `org.testcontainers:testcontainers-junit-jupiter` et `testcontainers-postgresql` (sans version, gérées par le BOM Spring Boot) + `spring-boot-testcontainers` pour `@ServiceConnection`
+- Piège Spring Boot 4 : Testcontainers 2.0 a renommé tous ses artefacts avec le préfixe `testcontainers-` (`org.testcontainers:junit-jupiter` → `testcontainers-junit-jupiter`) et relocalisé les classes de conteneurs dans des packages dédiés (`org.testcontainers.postgresql.PostgreSQLContainer` au lieu de `org.testcontainers.containers.PostgreSQLContainer`) ; `PostgreSQLContainer` n'est aussi plus une classe générique (retrait du `<?>`)
+- `@ServiceConnection` préféré à `@DynamicPropertySource` : configuration automatique du datasource vers le conteneur, sans propriétés à mapper à la main
+- Flyway s'exécute nativement contre le conteneur de test au démarrage du contexte — chaque run de test part d'un schéma vierge et migré, fidèle à la prod
+- Suppression de `TaskTrackerApplicationTests` (généré par défaut par Spring Initializr) — devenu obsolète car sans profil actif ni datasource configuré, il échouait dès que Flyway/JPA sont devenus obligatoires au démarrage
+- `TaskControllerTest` créé (package `task/`), conteneur PostgreSQL déclaré et fonctionnel — build vert, premier test métier (POST + GET) à écrire
+
 ## Points de vigilance identifiés
 - Toujours ajouter un constructeur vide (`protected`) dès qu'une entité JPA a un constructeur avec arguments
 - Ne jamais modifier une migration Flyway déjà appliquée — créer une nouvelle migration corrective
 - Bien vérifier la cohérence des types/longueurs entre migration SQL et entité JPA (`ddl-auto=validate` est strict là-dessus)
+- Spring Boot 4 casse plusieurs habitudes Spring Boot 3 : starters explicites requis (Flyway), renommages d'artefacts (webmvc, Testcontainers 2.0), passage à Jackson 3 — toujours vérifier la compatibilité d'une lib tierce avant de chercher l'erreur ailleurs
