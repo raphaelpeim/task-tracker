@@ -1,19 +1,68 @@
 package com.personal.task_tracker.user.service;
 
+import com.personal.task_tracker.user.dto.UserCreateDto;
 import com.personal.task_tracker.user.entity.AppUser;
+import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import com.personal.task_tracker.user.exception.UserNotFoundException;
+import com.personal.task_tracker.user.mapper.UserMapper;
 import com.personal.task_tracker.user.repository.UserRepository;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Locale;
 
 @Service
 @Transactional(readOnly = true)
 public class UserService {
 
-	private final UserRepository repository;
+	private static final String USERNAME_UNIQUE_INDEX = "app_user_username_upper";
+	private static final String EMAIL_UNIQUE_CONSTRAINT = "app_user_email_key";
 
-	public UserService(UserRepository repository) {
+	private final UserRepository repository;
+	private final PasswordEncoder passwordEncoder;
+
+	public UserService(UserRepository repository, PasswordEncoder passwordEncoder) {
 		this.repository = repository;
+		this.passwordEncoder = passwordEncoder;
+	}
+
+	/**
+	 * Create a user
+	 *
+	 * @param userDto user to create data
+	 * @return the created user
+	 * @throws UserAlreadyExistsException if the username (case-insensitive) or the email is already used
+	 */
+	@Transactional
+	public AppUser createUser(UserCreateDto userDto) {
+		String username = userDto.username().trim();
+		String email = userDto.email().trim().toLowerCase(Locale.ROOT);
+
+		if (repository.existsByUsernameIgnoreCase(username)) {
+			throw UserAlreadyExistsException.username();
+		}
+		if (repository.existsByEmail(email)) {
+			throw UserAlreadyExistsException.email();
+		}
+
+		String passwordHash = passwordEncoder.encode(userDto.rawPassword());
+		AppUser user = UserMapper.toEntity(userDto, username, email, passwordHash);
+
+		try {
+			return repository.saveAndFlush(user);
+		} catch (DataIntegrityViolationException exception) {
+			String constraintName = exception.getCause() instanceof ConstraintViolationException cve ? cve.getConstraintName() : null;
+			if (USERNAME_UNIQUE_INDEX.equals(constraintName)) {
+				throw UserAlreadyExistsException.username(exception);
+			}
+			if (EMAIL_UNIQUE_CONSTRAINT.equals(constraintName)) {
+				throw UserAlreadyExistsException.email(exception);
+			}
+			throw exception;
+		}
 	}
 
 	/**

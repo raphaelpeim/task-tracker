@@ -1,8 +1,10 @@
 package com.personal.task_tracker.commons.exception;
 
+import com.personal.task_tracker.auth.dto.RegisterRequestDto;
 import com.personal.task_tracker.task.dto.TaskRequestDto;
 import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
 import com.personal.task_tracker.task.exception.TaskNotFoundException;
+import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import com.personal.task_tracker.user.exception.UserNotFoundException;
 import jakarta.validation.ConstraintViolation;
 import org.jspecify.annotations.NonNull;
@@ -38,7 +40,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	static final ResourceBundle MESSAGES = ResourceBundle.getBundle("ValidationMessages");
 	static final Map<Class<?>, String> DOMAINS = Map.of(
 			TaskRequestDto.class, "task",
-			TaskRequestPartialDto.class, "task"
+			TaskRequestPartialDto.class, "task",
+			RegisterRequestDto.class, "user"
 	);
 
 	// REQUESTS
@@ -192,6 +195,11 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	}
 
 	// USERS
+
+	@ExceptionHandler(UserAlreadyExistsException.class)
+	public ProblemDetail handleUserAlreadyExists(UserAlreadyExistsException ex) {
+		return problem(HttpStatus.CONFLICT, ex.getCode(), ex.getMessage());
+	}
 
 	@ExceptionHandler(UserNotFoundException.class)
 	public ProblemDetail handleUserNotFound(UserNotFoundException ex) {
