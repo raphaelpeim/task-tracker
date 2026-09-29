@@ -1,4 +1,4 @@
-package com.personal.task_tracker.user.dto;
+package com.personal.task_tracker.auth.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
