@@ -1,6 +1,7 @@
 package com.personal.task_tracker.user.mapper;
 
 import com.personal.task_tracker.auth.dto.RegisterRequestDto;
+import com.personal.task_tracker.auth.dto.RegisterResponseDto;
 import com.personal.task_tracker.user.entity.AppUser;
 import com.personal.task_tracker.user.enums.UserRole;
 
@@ -16,6 +17,17 @@ public class UserMapper {
 				registerRequestDto.email(),
 				registerRequestDto.password(),
 				UserRole.USER
+		);
+	}
+
+	public static RegisterResponseDto toRegisterResponseDto(AppUser user) {
+		return new RegisterResponseDto(
+				user.getId(),
+				user.getFirstname(),
+				user.getLastname(),
+				user.getUsername(),
+				user.getEmail(),
+				user.getRole().toString()
 		);
 	}
 }

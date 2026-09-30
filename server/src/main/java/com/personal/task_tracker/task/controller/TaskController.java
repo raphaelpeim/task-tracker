@@ -3,8 +3,6 @@ package com.personal.task_tracker.task.controller;
 import com.personal.task_tracker.task.dto.TaskRequestDto;
 import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
 import com.personal.task_tracker.task.dto.TaskResponseDto;
-import com.personal.task_tracker.task.entity.Task;
-import com.personal.task_tracker.task.mapper.TaskMapper;
 import com.personal.task_tracker.task.service.TaskService;
 import com.personal.task_tracker.task.validator.TaskUpdatePartialValidator;
 import jakarta.validation.Valid;
@@ -25,25 +23,24 @@ public class TaskController {
 
 	@GetMapping
 	public ResponseEntity<List<TaskResponseDto>> getAllTasks() {
-		List<TaskResponseDto> taskResponseDtoList = taskService.getAllTasks().stream().map(TaskMapper::toDto).toList();
-		return new ResponseEntity<>(taskResponseDtoList, HttpStatus.OK);
+		List<TaskResponseDto> tasksDto = taskService.getAllTasks();
+		return new ResponseEntity<>(tasksDto, HttpStatus.OK);
 	}
 
 	@GetMapping("/{taskId}")
 	public ResponseEntity<TaskResponseDto> getTask(
 			@PathVariable Long taskId
 	) {
-		TaskResponseDto taskResponseDto = TaskMapper.toDto(taskService.getTaskById(taskId));
-		return new ResponseEntity<>(taskResponseDto, HttpStatus.OK);
+		TaskResponseDto taskDto = taskService.getTaskById(taskId);
+		return new ResponseEntity<>(taskDto, HttpStatus.OK);
 	}
 
 	@PostMapping
 	public ResponseEntity<TaskResponseDto> createTask(
 			@Valid @RequestBody TaskRequestDto taskDto
 	) {
-		Task task = taskService.createTask(TaskMapper.toEntity(taskDto));
-		TaskResponseDto taskResponseDto = TaskMapper.toDto(task);
-		return new ResponseEntity<>(taskResponseDto, HttpStatus.CREATED);
+		TaskResponseDto createdTaskDto = taskService.createTask(taskDto);
+		return new ResponseEntity<>(createdTaskDto, HttpStatus.CREATED);
 	}
 
 	@PutMapping("/{taskId}")
@@ -51,9 +48,8 @@ public class TaskController {
 			@PathVariable Long taskId,
 			@Valid @RequestBody TaskRequestDto taskDto
 	) {
-		Task task = taskService.updateTask(taskId, TaskMapper.toEntity(taskDto));
-		TaskResponseDto taskResponseDto = TaskMapper.toDto(task);
-		return new ResponseEntity<>(taskResponseDto, HttpStatus.OK);
+		TaskResponseDto updatedTaskDto = taskService.updateTask(taskId, taskDto);
+		return new ResponseEntity<>(updatedTaskDto, HttpStatus.OK);
 	}
 
 	@PatchMapping("/{taskId}")
@@ -62,9 +58,8 @@ public class TaskController {
 			@Valid @RequestBody TaskRequestPartialDto taskDto
 	) {
 		TaskUpdatePartialValidator.validate(taskDto);
-		Task task = taskService.updatePartialTask(taskId, taskDto);
-		TaskResponseDto taskResponseDto = TaskMapper.toDto(task);
-		return new ResponseEntity<>(taskResponseDto, HttpStatus.OK);
+		TaskResponseDto updateTaskDto = taskService.updatePartialTask(taskId, taskDto);
+		return new ResponseEntity<>(updateTaskDto, HttpStatus.OK);
 	}
 
 	@DeleteMapping("/{taskId}")

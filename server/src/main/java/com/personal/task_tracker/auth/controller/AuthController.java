@@ -1,17 +1,17 @@
 package com.personal.task_tracker.auth.controller;
 
 import com.personal.task_tracker.auth.dto.RegisterRequestDto;
+import com.personal.task_tracker.auth.dto.RegisterResponseDto;
 import com.personal.task_tracker.auth.service.AuthService;
-import com.personal.task_tracker.user.entity.AppUser;
-import com.personal.task_tracker.user.mapper.UserMapper;
-import com.personal.task_tracker.user.service.UserService;
 import jakarta.validation.Valid;
-import org.springframework.stereotype.Controller;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
-@Controller
+@RestController
 @RequestMapping("/api/auth")
 class AuthController {
 
@@ -24,7 +24,7 @@ class AuthController {
 	}
 
 	@PostMapping("/register")
-	public AppUser register(@Valid @RequestBody RegisterRequestDto userDto) {
-		return service.register(userDto);
+	public ResponseEntity<RegisterResponseDto> register(@Valid @RequestBody RegisterRequestDto userDto) {
+		return new ResponseEntity<>(service.register(userDto),HttpStatus.CREATED);
 	}
 }

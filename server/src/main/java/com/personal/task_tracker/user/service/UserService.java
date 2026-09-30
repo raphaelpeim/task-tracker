@@ -18,6 +18,11 @@ public class UserService {
 		this.passwordEncoder = passwordEncoder;
 	}
 
+	/**
+	 * Create a user
+	 * @param registerRequestDto user to create data
+	 * @return the created user
+	 */
 	public AppUser createUser(RegisterRequestDto registerRequestDto) {
 		// TODO Vérifications
 		//	if (repository.existsByUsername(user.getUsername())) {
