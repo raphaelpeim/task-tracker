@@ -1,15 +1,20 @@
 package com.personal.task_tracker.task.service;
 
+import com.personal.task_tracker.task.dto.TaskRequestDto;
 import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
+import com.personal.task_tracker.task.dto.TaskResponseDto;
 import com.personal.task_tracker.task.exception.TaskNotFoundException;
 import com.personal.task_tracker.task.entity.Task;
 import com.personal.task_tracker.task.mapper.TaskMapper;
 import com.personal.task_tracker.task.repository.TaskRepository;
+import com.personal.task_tracker.task.validator.TaskUpdatePartialValidator;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
 @Service
+@Transactional(readOnly = true)
 public class TaskService {
 	private final TaskRepository repository;
 
@@ -21,66 +26,93 @@ public class TaskService {
 	 * Get all tasks
 	 * @return all tasks
 	 */
-	public List<Task> getAllTasks() {
-		return repository.findAll();
+	public List<TaskResponseDto> getAllTasks() {
+		return repository.findAll().stream().map(TaskMapper::toDto).toList();
 	}
 
 	/**
-	 * Get a specific task by its id
-	 * @param id id of the task
+	 * Get task by id
+	 * @param taskId id of the task
 	 * @return the corresponding task
+	 * @throws TaskNotFoundException error thrown if no tasks found
 	 */
-	public Task getTaskById(Long id) {
-		return repository.findById(id).orElseThrow(() -> new TaskNotFoundException("There is no task with id: " + id));
+	public TaskResponseDto getTaskById(Long taskId) {
+		return TaskMapper.toDto(findTaskById(taskId));
 	}
 
 	/**
 	 * Create a task
-	 * @param task the new task to create
-	 * @return the created new task
+	 * @param taskDto task to create data
+	 * @return the created task
 	 */
-	public Task createTask(Task task) {
-		return repository.save(task);
+	@Transactional
+	public TaskResponseDto createTask(TaskRequestDto taskDto) {
+		Task task = TaskMapper.toEntity(taskDto);
+		Task createdTask = repository.save(task);
+		return TaskMapper.toDto(createdTask);
 	}
 
 	/**
 	 * Update a task
-	 * @param id Id of the task to update
-	 * @param task The task with the new values
+	 * @param taskId Id of the task to update
+	 * @param taskDto task to update data
 	 * @return the updated task
+	 * @throws TaskNotFoundException error thrown if no tasks found
 	 */
-	public Task updateTask(Long id, Task task) {
-		Task taskToUpdate = getTaskById(id);
+	@Transactional
+	public TaskResponseDto updateTask(Long taskId, TaskRequestDto taskDto) {
+		Task task = findTaskById(taskId);
 
-		taskToUpdate.setTitle(task.getTitle());
-		taskToUpdate.setDescription(task.getDescription());
-		taskToUpdate.setType(task.getType());
-		taskToUpdate.setStatus(task.getStatus());
-		taskToUpdate.setPriority(task.getPriority());
-		taskToUpdate.setAssignee(task.getAssignee());
+		task.setTitle(taskDto.title());
+		task.setDescription(taskDto.description());
+		task.setType(taskDto.type());
+		task.setStatus(taskDto.status());
+		task.setPriority(taskDto.priority());
+		task.setAssignee(taskDto.assignee());
 
-		return repository.save(taskToUpdate);
+		repository.flush();
+
+		return TaskMapper.toDto(task);
 	}
 
 	/**
 	 * Update partially a task
-	 * @param id Id of the task to update
-	 * @param taskDto The task with the new values
+	 * @param taskId Id of the task to update
+	 * @param taskDto task to update data
 	 * @return the updated task
+	 * @throws TaskNotFoundException error thrown if no tasks found
 	 */
-	public Task updatePartialTask(Long id, TaskRequestPartialDto taskDto) {
-		Task taskToUpdate = getTaskById(id);
-		TaskMapper.applyPartialUpdate(taskToUpdate, taskDto);
-		return repository.save(taskToUpdate);
+	@Transactional
+	public TaskResponseDto updatePartialTask(Long taskId, TaskRequestPartialDto taskDto) {
+		TaskUpdatePartialValidator.validate(taskDto);
+
+		Task task = findTaskById(taskId);
+
+		TaskMapper.applyPartialUpdate(task, taskDto);
+
+		repository.flush();
+
+		return TaskMapper.toDto(task);
 	}
+
 	/**
 	 * Delete a task
-	 * @param id Id of the task to delete
+	 * @param taskId Id of the task to delete
 	 */
-	public void deleteTask(Long id) {
-		if (!repository.existsById(id)) {
-			throw new TaskNotFoundException("There is no task with id: " + id);
+	@Transactional
+	public void deleteTask(Long taskId) {
+		if (!repository.existsById(taskId)) {
+			throw new TaskNotFoundException("There is no task with id: " + taskId);
 		}
-		repository.deleteById(id);
+		repository.deleteById(taskId);
+	}
+
+	/**
+	 * Get task by id
+	 * @param taskId id of the task
+	 * @return the corresponding task
+	 */
+	private Task findTaskById(Long taskId) {
+		return repository.findById(taskId).orElseThrow(() -> new TaskNotFoundException("There is no task with id: " + taskId));
 	}
 }

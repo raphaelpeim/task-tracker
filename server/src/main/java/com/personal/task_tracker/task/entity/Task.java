@@ -61,10 +61,6 @@ public class Task {
 		return id;
 	}
 
-	public void setId(Long id) {
-		this.id = id;
-	}
-
 	public String getTitle() {
 		return title;
 	}
@@ -117,15 +113,7 @@ public class Task {
 		return createdDate;
 	}
 
-	public void setCreatedDate(LocalDateTime createdDate) {
-		this.createdDate = createdDate;
-	}
-
 	public LocalDateTime getUpdatedDate() {
 		return updatedDate;
-	}
-
-	public void setUpdatedDate(LocalDateTime updatedDate) {
-		this.updatedDate = updatedDate;
 	}
 }

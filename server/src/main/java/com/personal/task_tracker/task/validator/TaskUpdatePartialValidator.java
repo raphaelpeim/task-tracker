@@ -11,6 +11,9 @@ public class TaskUpdatePartialValidator {
 		if (dto.title().isPresent() && dto.title().get() == null) {
 			throw new IllegalArgumentException("title cannot be null");
 		}
+		if (dto.description().isPresent() && dto.description().get() == null) {
+			throw new IllegalArgumentException("description cannot be null");
+		}
 		if (dto.type().isPresent() && dto.type().get() == null) {
 			throw new IllegalArgumentException("type cannot be null");
 		}
