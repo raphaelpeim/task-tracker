@@ -1,6 +1,7 @@
 package com.personal.task_tracker.user.service;
 
 import com.personal.task_tracker.user.dto.UserCreateDto;
+import com.personal.task_tracker.user.dto.UserResponseDto;
 import com.personal.task_tracker.user.entity.AppUser;
 import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import com.personal.task_tracker.user.exception.UserNotFoundException;
@@ -8,10 +9,12 @@ import com.personal.task_tracker.user.mapper.UserMapper;
 import com.personal.task_tracker.user.repository.UserRepository;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Sort;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Locale;
 
 @Service
@@ -27,6 +30,29 @@ public class UserService {
 	public UserService(UserRepository repository, PasswordEncoder passwordEncoder) {
 		this.repository = repository;
 		this.passwordEncoder = passwordEncoder;
+	}
+
+	/**
+	 * Get all users
+	 *
+	 * @return All users, sorted by lastname, firstname and username
+	 */
+	public List<UserResponseDto> getAllUsers() {
+		return repository.findAll(Sort.by("lastname", "firstname", "username")).stream()
+				.map(UserMapper::toUserResponseDto)
+				.toList();
+	}
+
+	/**
+	 * Get a user by its id
+	 *
+	 * @param userId the user id
+	 * @return The corresponding user
+	 * @throws UserNotFoundException error thrown if there is no user with the id
+	 */
+	public UserResponseDto getUserById(Long userId) {
+		AppUser user = findUserById(userId);
+		return UserMapper.toUserResponseDto(user);
 	}
 
 	/**
