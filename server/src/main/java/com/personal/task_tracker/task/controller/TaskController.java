@@ -4,7 +4,6 @@ import com.personal.task_tracker.task.dto.TaskRequestDto;
 import com.personal.task_tracker.task.dto.TaskRequestPartialDto;
 import com.personal.task_tracker.task.dto.TaskResponseDto;
 import com.personal.task_tracker.task.service.TaskService;
-import com.personal.task_tracker.task.validator.TaskUpdatePartialValidator;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -57,7 +56,6 @@ public class TaskController {
 			@PathVariable Long taskId,
 			@Valid @RequestBody TaskRequestPartialDto taskDto
 	) {
-		TaskUpdatePartialValidator.validate(taskDto);
 		TaskResponseDto updateTaskDto = taskService.updatePartialTask(taskId, taskDto);
 		return new ResponseEntity<>(updateTaskDto, HttpStatus.OK);
 	}

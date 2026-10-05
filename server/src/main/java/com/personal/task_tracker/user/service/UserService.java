@@ -1,13 +1,19 @@
 package com.personal.task_tracker.user.service;
 
-import com.personal.task_tracker.auth.dto.RegisterRequestDto;
+import com.personal.task_tracker.user.dto.UserCreateDto;
 import com.personal.task_tracker.user.entity.AppUser;
+import com.personal.task_tracker.user.enums.UserRole;
+import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import com.personal.task_tracker.user.mapper.UserMapper;
 import com.personal.task_tracker.user.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Optional;
 
 @Service
+@Transactional(readOnly = true)
 public class UserService {
 
 	private final UserRepository repository;
@@ -20,21 +26,26 @@ public class UserService {
 
 	/**
 	 * Create a user
-	 * @param registerRequestDto user to create data
+	 *
+	 * @param userDto user to create data
 	 * @return the created user
 	 */
-	public AppUser createUser(RegisterRequestDto registerRequestDto) {
-		// TODO Vérifications
-		//	if (repository.existsByUsername(user.getUsername())) {
-		//		throw new Exception("");
-		//	}
-		//	if (repository.existsByEmail(user.getEmail())) {
-		//		throw new Exception("");
-		//	}
-
-		AppUser user = UserMapper.toEntity(registerRequestDto);
-		user.setPassword(passwordEncoder.encode(user.getPassword()));
+	@Transactional
+	public AppUser createUser(UserCreateDto userDto) {
+		if (repository.existsByUsername(userDto.username())) {
+			throw new UserAlreadyExistsException("Username already exists");
+		}
+		if (repository.existsByEmail(userDto.email())) {
+			throw new UserAlreadyExistsException("Email already exists");
+		}
+		String passwordHash = passwordEncoder.encode(userDto.rawPassword());
+		AppUser user = UserMapper.toEntity(userDto, passwordHash);
 
 		return repository.save(user);
+	}
+
+	public Optional<AppUser> findUserById(Long userId) {
+		return repository.findById(userId);
+				// .orElseThrow(it -> UserNotFoundException);
 	}
 }

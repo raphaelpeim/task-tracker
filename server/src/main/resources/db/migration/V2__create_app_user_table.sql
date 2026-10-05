@@ -23,3 +23,12 @@ COMMENT
     ON COLUMN app_user.password IS 'Password of the user';
 COMMENT
     ON COLUMN app_user.role IS 'Role of the user';
+
+ALTER TABLE task
+    ALTER COLUMN assignee TYPE BIGINT
+    USING task.assignee::BIGINT;
+
+ALTER TABLE task
+    ADD CONSTRAINT fk_task_assignee_app_user
+        FOREIGN KEY (assignee)
+            REFERENCES app_user(id);

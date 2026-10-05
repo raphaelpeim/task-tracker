@@ -1,6 +1,7 @@
 package com.personal.task_tracker.commons.exception;
 
 import com.personal.task_tracker.task.exception.TaskNotFoundException;
+import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -15,12 +16,7 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-	@ExceptionHandler(TaskNotFoundException.class)
-	public ResponseEntity<Map<String, String>> handleTaskNotFound(TaskNotFoundException ex) {
-		Map<String, String> body = new HashMap<>();
-		body.put("error", ex.getMessage());
-		return new ResponseEntity<>(body, HttpStatus.NOT_FOUND);
-	}
+	// REQUESTS
 
 	@ExceptionHandler(MethodArgumentNotValidException.class)
 	public ResponseEntity<Map<String, String>> handleValidation(MethodArgumentNotValidException ex) {
@@ -42,5 +38,19 @@ public class GlobalExceptionHandler {
 				Map.of("error", "The request body is wrong or contains an invalid value"),
 				HttpStatus.BAD_REQUEST
 		);
+	}
+
+	// USERS
+
+	@ExceptionHandler(UserAlreadyExistsException.class)
+	public ResponseEntity<Map<String, String>> handleUserAlreadyExists(UserAlreadyExistsException ex) {
+		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.CONFLICT);
+	}
+
+	// TASKS
+
+	@ExceptionHandler(TaskNotFoundException.class)
+	public ResponseEntity<Map<String, String>> handleTaskNotFound(TaskNotFoundException ex) {
+		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.NOT_FOUND);
 	}
 }

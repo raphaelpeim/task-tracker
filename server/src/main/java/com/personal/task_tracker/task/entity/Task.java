@@ -3,6 +3,7 @@ package com.personal.task_tracker.task.entity;
 import com.personal.task_tracker.task.enums.TaskPriority;
 import com.personal.task_tracker.task.enums.TaskStatus;
 import com.personal.task_tracker.task.enums.TaskType;
+import com.personal.task_tracker.user.entity.AppUser;
 import jakarta.persistence.*;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
@@ -33,8 +34,9 @@ public class Task {
 	@Column(name="priority", length=10, nullable=false)
 	private TaskPriority priority;
 
-	@Column(name="assignee", length=50)
-	private String assignee; // TODO Link with User table
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name="id")
+	private AppUser assignee;
 
 	@CreationTimestamp
 	@Column(name="created_date", nullable=false, updatable=false)
@@ -48,7 +50,7 @@ public class Task {
 
 	}
 
-	public Task(String title, String description, TaskType type, TaskStatus status, TaskPriority priority, String assignee) {
+	public Task(String title, String description, TaskType type, TaskStatus status, TaskPriority priority, AppUser assignee) {
 		this.title = title;
 		this.description = description;
 		this.type = type;
@@ -101,11 +103,11 @@ public class Task {
 		this.priority = priority;
 	}
 
-	public String getAssignee() {
+	public AppUser getAssignee() {
 		return assignee;
 	}
 
-	public void setAssignee(String assignee) {
+	public void setAssignee(AppUser assignee) {
 		this.assignee = assignee;
 	}
 

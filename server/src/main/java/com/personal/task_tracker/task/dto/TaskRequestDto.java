@@ -13,5 +13,5 @@ public record TaskRequestDto(
 		@NotNull TaskType type,
 		@NotNull TaskStatus status,
 		@NotNull TaskPriority priority,
-		@NotBlank String assignee
+		Long assigneeId
 ) {}
