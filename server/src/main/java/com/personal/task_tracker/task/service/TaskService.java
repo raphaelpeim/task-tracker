@@ -8,17 +8,22 @@ import com.personal.task_tracker.task.entity.Task;
 import com.personal.task_tracker.task.mapper.TaskMapper;
 import com.personal.task_tracker.task.repository.TaskRepository;
 import com.personal.task_tracker.task.validator.TaskUpdatePartialValidator;
+import com.personal.task_tracker.user.entity.AppUser;
+import com.personal.task_tracker.user.service.UserService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Optional;
 
 @Service
 @Transactional(readOnly = true)
 public class TaskService {
+	private final UserService userService;
 	private final TaskRepository repository;
 
-	public TaskService(TaskRepository repository) {
+	public TaskService(UserService userService, TaskRepository repository) {
+		this.userService = userService;
 		this.repository = repository;
 	}
 
@@ -62,13 +67,9 @@ public class TaskService {
 	@Transactional
 	public TaskResponseDto updateTask(Long taskId, TaskRequestDto taskDto) {
 		Task task = findTaskById(taskId);
+		Optional<AppUser> user = userService.findUserById(taskDto.assigneeId());
 
-		task.setTitle(taskDto.title());
-		task.setDescription(taskDto.description());
-		task.setType(taskDto.type());
-		task.setStatus(taskDto.status());
-		task.setPriority(taskDto.priority());
-		task.setAssignee(taskDto.assignee());
+		TaskMapper.applyUpdate(task, taskDto);
 
 		repository.flush();
 
@@ -111,6 +112,7 @@ public class TaskService {
 	 * Get task by id
 	 * @param taskId id of the task
 	 * @return the corresponding task
+	 * @throws TaskNotFoundException error thrown if no tasks found
 	 */
 	private Task findTaskById(Long taskId) {
 		return repository.findById(taskId).orElseThrow(() -> new TaskNotFoundException("There is no task with id: " + taskId));

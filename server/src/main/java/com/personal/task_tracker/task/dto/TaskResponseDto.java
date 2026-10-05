@@ -13,7 +13,7 @@ public record TaskResponseDto(
 		TaskType type,
 		TaskStatus status,
 		TaskPriority priority,
-		String assignee,
+		Long assignee,
 		LocalDateTime createdDate,
 		LocalDateTime updatedDate
 ) {
