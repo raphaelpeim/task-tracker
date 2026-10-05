@@ -4,6 +4,7 @@ import com.personal.task_tracker.user.dto.UserCreateDto;
 import com.personal.task_tracker.user.entity.AppUser;
 import com.personal.task_tracker.user.enums.UserRole;
 import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
+import com.personal.task_tracker.user.exception.UserNotFoundException;
 import com.personal.task_tracker.user.mapper.UserMapper;
 import com.personal.task_tracker.user.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -44,8 +45,7 @@ public class UserService {
 		return repository.save(user);
 	}
 
-	public Optional<AppUser> findUserById(Long userId) {
-		return repository.findById(userId);
-				// .orElseThrow(it -> UserNotFoundException);
+	public AppUser findUserById(Long userId) {
+		return repository.findById(userId).orElseThrow(() -> new UserNotFoundException("There is no user with id: " + userId));
 	}
 }

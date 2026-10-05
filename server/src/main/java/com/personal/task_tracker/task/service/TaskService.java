@@ -52,7 +52,8 @@ public class TaskService {
 	 */
 	@Transactional
 	public TaskResponseDto createTask(TaskRequestDto taskDto) {
-		Task task = TaskMapper.toEntity(taskDto);
+		AppUser user = userService.findUserById(taskDto.assigneeId());
+		Task task = TaskMapper.toEntity(taskDto, user);
 		Task createdTask = repository.save(task);
 		return TaskMapper.toDto(createdTask);
 	}
@@ -67,9 +68,9 @@ public class TaskService {
 	@Transactional
 	public TaskResponseDto updateTask(Long taskId, TaskRequestDto taskDto) {
 		Task task = findTaskById(taskId);
-		Optional<AppUser> user = userService.findUserById(taskDto.assigneeId());
+		AppUser user = userService.findUserById(taskDto.assigneeId());
 
-		TaskMapper.applyUpdate(task, taskDto);
+		TaskMapper.applyUpdate(task, taskDto, user);
 
 		repository.flush();
 
@@ -87,9 +88,10 @@ public class TaskService {
 	public TaskResponseDto updatePartialTask(Long taskId, TaskRequestPartialDto taskDto) {
 		TaskUpdatePartialValidator.validate(taskDto);
 
+		AppUser user = userService.findUserById(taskId);
 		Task task = findTaskById(taskId);
 
-		TaskMapper.applyPartialUpdate(task, taskDto);
+		TaskMapper.applyPartialUpdate(task, taskDto, user);
 
 		repository.flush();
 

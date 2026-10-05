@@ -2,6 +2,7 @@ package com.personal.task_tracker.commons.exception;
 
 import com.personal.task_tracker.task.exception.TaskNotFoundException;
 import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
+import com.personal.task_tracker.user.exception.UserNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -45,6 +46,11 @@ public class GlobalExceptionHandler {
 	@ExceptionHandler(UserAlreadyExistsException.class)
 	public ResponseEntity<Map<String, String>> handleUserAlreadyExists(UserAlreadyExistsException ex) {
 		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.CONFLICT);
+	}
+
+	@ExceptionHandler(UserNotFoundException.class)
+	public ResponseEntity<Map<String, String>> handleTaskNotFound(UserNotFoundException ex) {
+		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.NOT_FOUND);
 	}
 
 	// TASKS

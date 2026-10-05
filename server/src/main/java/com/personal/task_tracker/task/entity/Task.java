@@ -35,7 +35,7 @@ public class Task {
 	private TaskPriority priority;
 
 	@ManyToOne(fetch = FetchType.LAZY)
-	@JoinColumn(name="id")
+	@JoinColumn(name="assignee_id", referencedColumnName = "id")
 	private AppUser assignee;
 
 	@CreationTimestamp

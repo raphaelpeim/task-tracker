@@ -7,6 +7,8 @@ import com.personal.task_tracker.task.enums.TaskPriority;
 import com.personal.task_tracker.task.enums.TaskStatus;
 import com.personal.task_tracker.task.enums.TaskType;
 import com.personal.task_tracker.task.repository.TaskRepository;
+import com.personal.task_tracker.user.entity.AppUser;
+import com.personal.task_tracker.user.enums.UserRole;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterEach;
@@ -71,7 +73,7 @@ class TaskControllerTest {
 				TaskType.FEATURE,
 				TaskStatus.READY,
 				TaskPriority.HIGH,
-				"Assignee"
+				1L
 		);
 
 		Long createdId = given()
@@ -108,7 +110,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 
 		given()
@@ -129,7 +131,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 
 		given()
@@ -150,7 +152,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 
 		given()
@@ -171,7 +173,7 @@ class TaskControllerTest {
 				null,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 
 		given()
@@ -203,7 +205,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 		TaskRequestPartialDto taskUpdateDto = new TaskRequestPartialDto(
 				JsonNullable.undefined(),
@@ -258,7 +260,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 		TaskRequestPartialDto taskUpdateDto = new TaskRequestPartialDto(
 				JsonNullable.undefined(),
@@ -302,7 +304,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 		TaskRequestPartialDto taskUpdateDto = new TaskRequestPartialDto(
 				JsonNullable.of(null),
@@ -365,7 +367,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 
 		Long createdId = given()
@@ -414,7 +416,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"a".repeat(50)
+				1L
 		);
 
 		given()
@@ -434,7 +436,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"a".repeat(51)
+				1L
 		);
 
 		given()
@@ -560,7 +562,7 @@ class TaskControllerTest {
 				TaskType.FEATURE,
 				TaskStatus.DONE,
 				TaskPriority.CRITICAL,
-				"New assignee"
+				1L
 		);
 
 		given()
@@ -619,7 +621,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				1L
 		);
 
 		given()
@@ -710,7 +712,14 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				"Assignee"
+				new AppUser(
+						"Firstname",
+						"Lastname",
+						"Username",
+						"email@mail.com",
+						"passwordHash",
+						UserRole.USER
+				)
 		));
 	}
 }
