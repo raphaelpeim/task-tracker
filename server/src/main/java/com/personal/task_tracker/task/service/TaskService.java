@@ -14,7 +14,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.Optional;
 
 @Service
 @Transactional(readOnly = true)
@@ -52,9 +51,15 @@ public class TaskService {
 	 */
 	@Transactional
 	public TaskResponseDto createTask(TaskRequestDto taskDto) {
-		AppUser user = userService.findUserById(taskDto.assigneeId());
-		Task task = TaskMapper.toEntity(taskDto, user);
+		Task task = TaskMapper.toEntity(taskDto);
+
+		if (taskDto.assigneeId() != null) {
+			AppUser user = userService.findUserById(taskDto.assigneeId());
+			task.setAssignee(user);
+		}
+
 		Task createdTask = repository.save(task);
+
 		return TaskMapper.toDto(createdTask);
 	}
 
@@ -68,9 +73,15 @@ public class TaskService {
 	@Transactional
 	public TaskResponseDto updateTask(Long taskId, TaskRequestDto taskDto) {
 		Task task = findTaskById(taskId);
-		AppUser user = userService.findUserById(taskDto.assigneeId());
 
-		TaskMapper.applyUpdate(task, taskDto, user);
+		TaskMapper.applyUpdate(task, taskDto);
+
+		if (taskDto.assigneeId() == null) {
+			task.setAssignee(null);
+		} else {
+			AppUser user = userService.findUserById(taskDto.assigneeId());
+			task.setAssignee(user);
+		}
 
 		repository.flush();
 
@@ -88,10 +99,18 @@ public class TaskService {
 	public TaskResponseDto updatePartialTask(Long taskId, TaskRequestPartialDto taskDto) {
 		TaskUpdatePartialValidator.validate(taskDto);
 
-		AppUser user = userService.findUserById(taskId);
 		Task task = findTaskById(taskId);
 
-		TaskMapper.applyPartialUpdate(task, taskDto, user);
+		TaskMapper.applyPartialUpdate(task, taskDto);
+
+		if (taskDto.assigneeId().isPresent()) {
+			if (taskDto.assigneeId().get() == null) {
+				task.setAssignee(null);
+			} else {
+				AppUser user = userService.findUserById(taskDto.assigneeId().get());
+				task.setAssignee(user);
+			}
+		}
 
 		repository.flush();
 

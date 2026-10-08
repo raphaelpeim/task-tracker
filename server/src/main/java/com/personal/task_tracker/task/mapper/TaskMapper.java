@@ -6,19 +6,21 @@ import com.personal.task_tracker.task.dto.TaskResponseDto;
 import com.personal.task_tracker.task.entity.Task;
 import com.personal.task_tracker.user.entity.AppUser;
 import com.personal.task_tracker.user.mapper.UserMapper;
+import jakarta.annotation.Nullable;
 
 public class TaskMapper {
 
-	private TaskMapper() {}
+	private TaskMapper() {
+	}
 
-	public static Task toEntity(TaskRequestDto taskDto, AppUser assignee) {
+	public static Task toEntity(TaskRequestDto taskDto) {
 		return new Task(
 				taskDto.title(),
 				taskDto.description(),
 				taskDto.type(),
 				taskDto.status(),
 				taskDto.priority(),
-				assignee
+				null
 		);
 	}
 
@@ -30,27 +32,25 @@ public class TaskMapper {
 				task.getType(),
 				task.getStatus(),
 				task.getPriority(),
-				UserMapper.toDto(task.getAssignee()),
+				task.getAssignee() != null ? UserMapper.toDto(task.getAssignee()) : null,
 				task.getCreatedDate(),
 				task.getUpdatedDate()
 		);
 	}
 
-	public static void applyUpdate(Task task, TaskRequestDto taskDto, AppUser assignee) {
+	public static void applyUpdate(Task task, TaskRequestDto taskDto) {
 		task.setTitle(taskDto.title());
 		task.setDescription(taskDto.description());
 		task.setType(taskDto.type());
 		task.setStatus(taskDto.status());
 		task.setPriority(taskDto.priority());
-		task.setAssignee(assignee);
 	}
 
-	public static void applyPartialUpdate(Task task, TaskRequestPartialDto taskDto, AppUser assignee) {
+	public static void applyPartialUpdate(Task task, TaskRequestPartialDto taskDto) {
 		taskDto.title().ifPresent(task::setTitle);
 		taskDto.description().ifPresent(task::setDescription);
 		taskDto.type().ifPresent(task::setType);
 		taskDto.status().ifPresent(task::setStatus);
 		taskDto.priority().ifPresent(task::setPriority);
-		taskDto.assignee().ifPresent(_ -> task.setAssignee(assignee));
 	}
 }

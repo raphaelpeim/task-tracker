@@ -11,5 +11,5 @@ public record TaskRequestPartialDto(
 		JsonNullable<TaskType> type,
 		JsonNullable<TaskStatus> status,
 		JsonNullable<TaskPriority> priority,
-		JsonNullable<String> assignee
+		JsonNullable<Long> assigneeId
 ) {}

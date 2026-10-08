@@ -3,6 +3,7 @@ package com.personal.task_tracker.task.dto;
 import com.personal.task_tracker.task.enums.TaskPriority;
 import com.personal.task_tracker.task.enums.TaskStatus;
 import com.personal.task_tracker.task.enums.TaskType;
+import jakarta.annotation.Nullable;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;

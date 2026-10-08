@@ -22,6 +22,7 @@ public class UserMapper {
 
 	public static UserResponseDto toDto(AppUser user) {
 		return new UserResponseDto(
+				user.getId(),
 				user.getFirstname(),
 				user.getLastname(),
 				user.getUsername(),

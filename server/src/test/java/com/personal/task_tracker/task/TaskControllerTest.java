@@ -9,6 +9,7 @@ import com.personal.task_tracker.task.enums.TaskType;
 import com.personal.task_tracker.task.repository.TaskRepository;
 import com.personal.task_tracker.user.entity.AppUser;
 import com.personal.task_tracker.user.enums.UserRole;
+import com.personal.task_tracker.user.repository.UserRepository;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterEach;
@@ -54,15 +55,22 @@ class TaskControllerTest {
 	@Autowired
 	private TaskRepository repository;
 
+	@Autowired
+	private UserRepository userRepository;
+
+	private AppUser assignee;
+
 	@BeforeEach
 	void setUp() {
 		RestAssured.port = port;
 		Locale.setDefault(Locale.ENGLISH);
+		assignee = saveUser("assignee", "assignee@mail.com");
 	}
 
 	@AfterEach
 	void cleanUp() {
 		repository.deleteAll();
+		userRepository.deleteAll();
 	}
 
 	@Test
@@ -73,7 +81,7 @@ class TaskControllerTest {
 				TaskType.FEATURE,
 				TaskStatus.READY,
 				TaskPriority.HIGH,
-				1L
+				assignee.getId()
 		);
 
 		Long createdId = given()
@@ -99,7 +107,7 @@ class TaskControllerTest {
 				.body("type", equalTo(taskDto.type().toString()))
 				.body("status", equalTo(taskDto.status().toString()))
 				.body("priority", equalTo(taskDto.priority().toString()))
-				.body("assignee", equalTo(taskDto.assigneeId()));
+				.body("assignee.id", equalTo(assignee.getId().intValue()));
 	}
 
 	@Test
@@ -110,7 +118,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		given()
@@ -131,7 +139,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		given()
@@ -152,7 +160,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		given()
@@ -173,7 +181,7 @@ class TaskControllerTest {
 				null,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		given()
@@ -205,7 +213,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 		TaskRequestPartialDto taskUpdateDto = new TaskRequestPartialDto(
 				JsonNullable.undefined(),
@@ -241,7 +249,7 @@ class TaskControllerTest {
 				.body("type", equalTo(taskCreateDto.type().toString()))
 				.body("status", equalTo(TaskStatus.IN_PROGRESS.toString()))
 				.body("priority", equalTo(taskCreateDto.priority().toString()))
-				.body("assignee", equalTo(taskCreateDto.assigneeId()));
+				.body("assignee.id", equalTo(assignee.getId().intValue()));
 
 		Task storedTask = repository.findById(createdId).orElseThrow();
 		assertThat(storedTask.getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
@@ -249,7 +257,7 @@ class TaskControllerTest {
 		assertThat(storedTask.getDescription()).isEqualTo(taskCreateDto.description());
 		assertThat(storedTask.getType()).isEqualTo(taskCreateDto.type());
 		assertThat(storedTask.getPriority()).isEqualTo(taskCreateDto.priority());
-		assertThat(storedTask.getAssignee()).isEqualTo(taskCreateDto.assigneeId());
+		assertThat(assigneeIdOf(createdId)).isEqualTo(assignee.getId());
 	}
 
 	@Test
@@ -260,7 +268,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 		TaskRequestPartialDto taskUpdateDto = new TaskRequestPartialDto(
 				JsonNullable.undefined(),
@@ -291,7 +299,7 @@ class TaskControllerTest {
 				.then()
 				.statusCode(200)
 				.assertThat()
-				.body("assignee", equalTo(null));
+				.body("assignee", nullValue());
 
 		assertThat(repository.findById(createdId).orElseThrow().getAssignee()).isNull();
 	}
@@ -304,7 +312,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 		TaskRequestPartialDto taskUpdateDto = new TaskRequestPartialDto(
 				JsonNullable.of(null),
@@ -367,7 +375,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		Long createdId = given()
@@ -416,7 +424,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		given()
@@ -429,24 +437,26 @@ class TaskControllerTest {
 	}
 
 	@Test
-	void shouldReturn400WhenAssigneeIsTooLong() {
-		TaskRequestDto invalidDto = new TaskRequestDto(
+	void shouldReturn404WhenAssigneeDoesNotExistOnCreate() {
+		TaskRequestDto taskDto = new TaskRequestDto(
 				"Title",
 				"Description",
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				999999L
 		);
 
 		given()
 				.contentType(ContentType.JSON)
-				.body(invalidDto)
+				.body(taskDto)
 				.when()
 				.post("/api/tasks")
 				.then()
-				.statusCode(400)
-				.body("assignee", equalTo("size must be between 0 and 50"));
+				.statusCode(404)
+				.body("error", equalTo("There is no user with id: 999999"));
+
+		assertThat(repository.count()).isZero();
 	}
 
 	@Test
@@ -489,7 +499,7 @@ class TaskControllerTest {
 				.body("type", equalTo("must not be null"))
 				.body("status", equalTo("must not be null"))
 				.body("priority", equalTo("must not be null"))
-				.body("$", not(hasKey("assignee")));
+				.body("$", not(hasKey("assigneeId")));
 	}
 
 	@Test
@@ -556,13 +566,14 @@ class TaskControllerTest {
 	@Test
 	void shouldReplaceAllFieldsOnPut() {
 		Task existingTask = saveTask("Title");
+		AppUser newAssignee = saveUser("newassignee", "newassignee@mail.com");
 		TaskRequestDto taskUpdateDto = new TaskRequestDto(
 				"New title",
 				"New description",
 				TaskType.FEATURE,
 				TaskStatus.DONE,
 				TaskPriority.CRITICAL,
-				1L
+				newAssignee.getId()
 		);
 
 		given()
@@ -575,7 +586,8 @@ class TaskControllerTest {
 				.statusCode(200)
 				.body("id", equalTo(existingTask.getId().intValue()))
 				.body("title", equalTo(taskUpdateDto.title()))
-				.body("status", equalTo(taskUpdateDto.status().toString()));
+				.body("status", equalTo(taskUpdateDto.status().toString()))
+				.body("assignee.id", equalTo(newAssignee.getId().intValue()));
 
 		Task storedTask = repository.findById(existingTask.getId()).orElseThrow();
 		assertThat(storedTask.getTitle()).isEqualTo(taskUpdateDto.title());
@@ -583,7 +595,7 @@ class TaskControllerTest {
 		assertThat(storedTask.getType()).isEqualTo(taskUpdateDto.type());
 		assertThat(storedTask.getStatus()).isEqualTo(taskUpdateDto.status());
 		assertThat(storedTask.getPriority()).isEqualTo(taskUpdateDto.priority());
-		assertThat(storedTask.getAssignee()).isEqualTo(taskUpdateDto.assigneeId());
+		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(newAssignee.getId());
 		assertThat(storedTask.getCreatedDate()).isEqualTo(existingTask.getCreatedDate());
 		assertThat(storedTask.getUpdatedDate()).isAfterOrEqualTo(existingTask.getUpdatedDate());
 	}
@@ -614,6 +626,32 @@ class TaskControllerTest {
 	}
 
 	@Test
+	void shouldReturn404AndKeepTaskUnchangedWhenPutAssigneeDoesNotExist() {
+		Task existingTask = saveTask("Title");
+		TaskRequestDto taskUpdateDto = new TaskRequestDto(
+				"New title",
+				"Description",
+				TaskType.BUG,
+				TaskStatus.BACKLOG,
+				TaskPriority.LOW,
+				999999L
+		);
+
+		given()
+				.contentType(ContentType.JSON)
+				.pathParam("id", existingTask.getId())
+				.body(taskUpdateDto)
+				.when()
+				.put("/api/tasks/{id}")
+				.then()
+				.statusCode(404)
+				.body("error", equalTo("There is no user with id: 999999"));
+
+		assertThat(repository.findById(existingTask.getId()).orElseThrow().getTitle()).isEqualTo(existingTask.getTitle());
+		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(assignee.getId());
+	}
+
+	@Test
 	void shouldReturn404WhenUpdatingNonExistentTask() {
 		TaskRequestDto taskUpdateDto = new TaskRequestDto(
 				"Title",
@@ -621,7 +659,7 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				1L
+				assignee.getId()
 		);
 
 		given()
@@ -644,7 +682,7 @@ class TaskControllerTest {
 				Arguments.of(Map.of("title", "a".repeat(51)), "title cannot exceed 50 characters"),
 				Arguments.of(Map.of("description", "   "), "description cannot be null nor blank"),
 				Arguments.of(Map.of("description", "a".repeat(256)), "description cannot exceed 255 characters"),
-				Arguments.of(Map.of("assignee", "a".repeat(51)), "assignee cannot exceed 50 characters")
+				Arguments.of(Map.of("assigneeId", "abc"), "The request body is wrong or contains an invalid value")
 		);
 	}
 
@@ -666,7 +704,7 @@ class TaskControllerTest {
 		Task storedTask = repository.findById(existingTask.getId()).orElseThrow();
 		assertThat(storedTask.getTitle()).isEqualTo(existingTask.getTitle());
 		assertThat(storedTask.getDescription()).isEqualTo(existingTask.getDescription());
-		assertThat(storedTask.getAssignee()).isEqualTo(existingTask.getAssignee());
+		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(assignee.getId());
 	}
 
 	@Test
@@ -689,7 +727,43 @@ class TaskControllerTest {
 		assertThat(storedTask.getType()).isEqualTo(existingTask.getType());
 		assertThat(storedTask.getStatus()).isEqualTo(existingTask.getStatus());
 		assertThat(storedTask.getPriority()).isEqualTo(existingTask.getPriority());
-		assertThat(storedTask.getAssignee()).isEqualTo(existingTask.getAssignee());
+		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(assignee.getId());
+	}
+
+	@Test
+	void shouldReassignTaskWhenPatchHasAssigneeId() {
+		Task existingTask = saveTask("Title");
+		AppUser newAssignee = saveUser("newassignee", "newassignee@mail.com");
+
+		given()
+				.contentType(ContentType.JSON)
+				.pathParam("id", existingTask.getId())
+				.body(Map.of("assigneeId", newAssignee.getId()))
+				.when()
+				.patch("/api/tasks/{id}")
+				.then()
+				.statusCode(200)
+				.body("title", equalTo(existingTask.getTitle()))
+				.body("assignee.id", equalTo(newAssignee.getId().intValue()));
+
+		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(newAssignee.getId());
+	}
+
+	@Test
+	void shouldReturn404AndKeepAssigneeWhenPatchAssigneeDoesNotExist() {
+		Task existingTask = saveTask("Title");
+
+		given()
+				.contentType(ContentType.JSON)
+				.pathParam("id", existingTask.getId())
+				.body(Map.of("assigneeId", 999999L))
+				.when()
+				.patch("/api/tasks/{id}")
+				.then()
+				.statusCode(404)
+				.body("error", equalTo("There is no user with id: 999999"));
+
+		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(assignee.getId());
 	}
 
 	@Test
@@ -712,14 +786,23 @@ class TaskControllerTest {
 				TaskType.BUG,
 				TaskStatus.BACKLOG,
 				TaskPriority.LOW,
-				new AppUser(
-						"Firstname",
-						"Lastname",
-						"Username",
-						"email@mail.com",
-						"passwordHash",
-						UserRole.USER
-				)
+				assignee
 		));
+	}
+
+	private AppUser saveUser(String username, String email) {
+		return userRepository.save(new AppUser("Firstname", "Lastname", username, email, "passwordHash", UserRole.USER));
+	}
+
+	private Long assigneeIdOf(Long taskId) {
+		return given()
+				.pathParam("id", taskId)
+				.when()
+				.get("/api/tasks/{id}")
+				.then()
+				.statusCode(200)
+				.extract()
+				.jsonPath()
+				.getObject("assignee.id", Long.class);
 	}
 }

@@ -1,8 +1,10 @@
 package com.personal.task_tracker.commons.exception;
 
+import com.personal.task_tracker.task.exception.InvalidTaskUpdateException;
 import com.personal.task_tracker.task.exception.TaskNotFoundException;
 import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import com.personal.task_tracker.user.exception.UserNotFoundException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -28,17 +30,18 @@ public class GlobalExceptionHandler {
 		return new ResponseEntity<>(errors, HttpStatus.BAD_REQUEST);
 	}
 
-	@ExceptionHandler(IllegalArgumentException.class)
-	public ResponseEntity<Map<String, String>> handleIllegalArgument(IllegalArgumentException ex) {
-		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.BAD_REQUEST);
-	}
-
 	@ExceptionHandler(HttpMessageNotReadableException.class)
 	public ResponseEntity<Map<String, String>> handleUnreadableBody() {
 		return new ResponseEntity<>(
 				Map.of("error", "The request body is wrong or contains an invalid value"),
 				HttpStatus.BAD_REQUEST
 		);
+	}
+
+	@ExceptionHandler(DataIntegrityViolationException.class)
+	public ResponseEntity<Map<String, String>> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
+		Map<String, String> errors = new HashMap<>();
+		return new ResponseEntity<>(errors, HttpStatus.CONFLICT);
 	}
 
 	// USERS
@@ -49,7 +52,7 @@ public class GlobalExceptionHandler {
 	}
 
 	@ExceptionHandler(UserNotFoundException.class)
-	public ResponseEntity<Map<String, String>> handleTaskNotFound(UserNotFoundException ex) {
+	public ResponseEntity<Map<String, String>> handleUserNotFound(UserNotFoundException ex) {
 		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.NOT_FOUND);
 	}
 
@@ -58,5 +61,10 @@ public class GlobalExceptionHandler {
 	@ExceptionHandler(TaskNotFoundException.class)
 	public ResponseEntity<Map<String, String>> handleTaskNotFound(TaskNotFoundException ex) {
 		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.NOT_FOUND);
+	}
+
+	@ExceptionHandler(InvalidTaskUpdateException.class)
+	public ResponseEntity<Map<String, String>> handleInvalidTaskUpdate(InvalidTaskUpdateException ex) {
+		return new ResponseEntity<>(Map.of("error", ex.getMessage()), HttpStatus.BAD_REQUEST);
 	}
 }
