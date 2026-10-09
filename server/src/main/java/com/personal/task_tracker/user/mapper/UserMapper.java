@@ -9,12 +9,12 @@ public class UserMapper {
 
 	private UserMapper() {}
 
-	public static AppUser toEntity(UserCreateDto userDto, String passwordHash) {
+	public static AppUser toEntity(UserCreateDto userDto, String username, String email, String passwordHash) {
 		return new AppUser(
 				userDto.firstname(),
 				userDto.lastname(),
-				userDto.username(),
-				userDto.email(),
+				username,
+				email,
 				passwordHash,
 				UserRole.USER
 		);

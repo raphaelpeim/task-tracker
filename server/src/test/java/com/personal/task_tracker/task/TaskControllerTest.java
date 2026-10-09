@@ -128,7 +128,7 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(400)
-				.body("title", equalTo("must not be blank"));
+				.body("errors.title", equalTo("must not be blank"));
 	}
 
 	@Test
@@ -149,7 +149,7 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(400)
-				.body("title", equalTo("size must be between 0 and 50"));
+				.body("errors.title", equalTo("size must be between 0 and 50"));
 	}
 
 	@Test
@@ -170,7 +170,7 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(400)
-				.body("description", equalTo("size must be between 0 and 255"));
+				.body("errors.description", equalTo("size must be between 0 and 255"));
 	}
 
 	@Test
@@ -191,7 +191,7 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(400)
-				.body("type", equalTo("must not be null"));
+				.body("errors.type", equalTo("must not be null"));
 	}
 
 	@Test
@@ -202,7 +202,8 @@ class TaskControllerTest {
 				.get("/api/tasks/{id}")
 				.then()
 				.statusCode(404)
-				.body("error", equalTo("There is no task with id: 999999"));
+				.contentType("application/problem+json")
+				.body("detail", equalTo("There is no task with id: 999999"));
 	}
 
 	@Test
@@ -454,7 +455,7 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(404)
-				.body("error", equalTo("There is no user with id: 999999"));
+				.body("detail", equalTo("There is no user with id: 999999"));
 
 		assertThat(repository.count()).isZero();
 	}
@@ -494,12 +495,13 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(400)
-				.body("title", equalTo("must not be blank"))
-				.body("description", equalTo("must not be blank"))
-				.body("type", equalTo("must not be null"))
-				.body("status", equalTo("must not be null"))
-				.body("priority", equalTo("must not be null"))
-				.body("$", not(hasKey("assigneeId")));
+				.contentType("application/problem+json")
+				.body("errors.title", equalTo("must not be blank"))
+				.body("errors.description", equalTo("must not be blank"))
+				.body("errors.type", equalTo("must not be null"))
+				.body("errors.status", equalTo("must not be null"))
+				.body("errors.priority", equalTo("must not be null"))
+				.body("errors", not(hasKey("assigneeId")));
 	}
 
 	@Test
@@ -521,7 +523,7 @@ class TaskControllerTest {
 				.post("/api/tasks")
 				.then()
 				.statusCode(400)
-				.body("error", equalTo("The request body is wrong or contains an invalid value"));
+				.body("detail", equalTo("The request body is wrong or contains an invalid value"));
 
 		assertThat(repository.count()).isZero();
 	}
@@ -558,7 +560,8 @@ class TaskControllerTest {
 				.when()
 				.get("/api/tasks/abc")
 				.then()
-				.statusCode(400);
+				.statusCode(400)
+				.contentType("application/problem+json");
 	}
 
 	// PUT
@@ -645,7 +648,7 @@ class TaskControllerTest {
 				.put("/api/tasks/{id}")
 				.then()
 				.statusCode(404)
-				.body("error", equalTo("There is no user with id: 999999"));
+				.body("detail", equalTo("There is no user with id: 999999"));
 
 		assertThat(repository.findById(existingTask.getId()).orElseThrow().getTitle()).isEqualTo(existingTask.getTitle());
 		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(assignee.getId());
@@ -670,7 +673,7 @@ class TaskControllerTest {
 				.put("/api/tasks/{id}")
 				.then()
 				.statusCode(404)
-				.body("error", equalTo("There is no task with id: 999999"));
+				.body("detail", equalTo("There is no task with id: 999999"));
 	}
 
 	// PATCH
@@ -699,7 +702,7 @@ class TaskControllerTest {
 				.patch("/api/tasks/{id}")
 				.then()
 				.statusCode(400)
-				.body("error", equalTo(expectedError));
+				.body("detail", equalTo(expectedError));
 
 		Task storedTask = repository.findById(existingTask.getId()).orElseThrow();
 		assertThat(storedTask.getTitle()).isEqualTo(existingTask.getTitle());
@@ -761,7 +764,7 @@ class TaskControllerTest {
 				.patch("/api/tasks/{id}")
 				.then()
 				.statusCode(404)
-				.body("error", equalTo("There is no user with id: 999999"));
+				.body("detail", equalTo("There is no user with id: 999999"));
 
 		assertThat(assigneeIdOf(existingTask.getId())).isEqualTo(assignee.getId());
 	}
@@ -776,7 +779,7 @@ class TaskControllerTest {
 				.patch("/api/tasks/{id}")
 				.then()
 				.statusCode(404)
-				.body("error", equalTo("There is no task with id: 999999"));
+				.body("detail", equalTo("There is no task with id: 999999"));
 	}
 
 	private Task saveTask(String title) {

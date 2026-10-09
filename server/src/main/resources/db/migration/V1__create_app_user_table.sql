@@ -3,13 +3,15 @@ CREATE TABLE app_user
     id           BIGSERIAL PRIMARY KEY,
     firstname    VARCHAR(50)  NOT NULL,
     lastname     VARCHAR(50)  NOT NULL,
-    username     VARCHAR(50)  NOT NULL UNIQUE,
+    username     VARCHAR(50)  NOT NULL,
     email        VARCHAR(255) NOT NULL UNIQUE,
     password     VARCHAR(255) NOT NULL,
     role         VARCHAR(50)  NOT NULL CHECK ( role IN ('ADMIN', 'USER', 'GUEST') ),
     created_date TIMESTAMP    NOT NULL,
     updated_date TIMESTAMP    NOT NULL
 );
+
+CREATE UNIQUE INDEX app_user_username_upper ON app_user (upper(username));
 
 COMMENT
     ON COLUMN app_user.firstname IS 'Firstname of the user';

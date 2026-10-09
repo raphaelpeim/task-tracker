@@ -19,7 +19,7 @@ public class AppUser {
 	@Column(name = "lastname", length = 50, nullable = false)
 	private String lastname;
 
-	@Column(name = "username", length = 50, nullable = false, unique = true)
+	@Column(name = "username", length = 50, nullable = false)
 	private String username;
 
 	@Column(name = "email", nullable = false, unique = true)

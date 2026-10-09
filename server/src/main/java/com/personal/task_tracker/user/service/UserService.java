@@ -7,16 +7,22 @@ import com.personal.task_tracker.user.exception.UserAlreadyExistsException;
 import com.personal.task_tracker.user.exception.UserNotFoundException;
 import com.personal.task_tracker.user.mapper.UserMapper;
 import com.personal.task_tracker.user.repository.UserRepository;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 @Service
 @Transactional(readOnly = true)
 public class UserService {
+
+	private static final String USERNAME_UNIQUE_INDEX = "app_user_username_upper";
+	private static final String EMAIL_UNIQUE_CONSTRAINT = "app_user_email_key";
 
 	private final UserRepository repository;
 	private final PasswordEncoder passwordEncoder;
@@ -57,20 +63,36 @@ public class UserService {
 	 *
 	 * @param userDto user to create data
 	 * @return the created user
+	 * @throws UserAlreadyExistsException if the username (case-insensitive) or the email is already used
 	 */
 	@Transactional
 	public AppUser createUser(UserCreateDto userDto) {
-		if (repository.existsByUsername(userDto.username().trim().toLowerCase())) {
+		String username = userDto.username().trim();
+		String email = userDto.email().trim().toLowerCase(Locale.ROOT);
+
+		if (repository.existsByUsernameIgnoreCase(username)) {
 			throw new UserAlreadyExistsException("Username already exists");
 		}
-		if (repository.existsByEmail(userDto.email().trim().toLowerCase())) {
+		if (repository.existsByEmail(email)) {
 			throw new UserAlreadyExistsException("Email already exists");
 		}
 
 		String passwordHash = passwordEncoder.encode(userDto.rawPassword());
-		AppUser user = UserMapper.toEntity(userDto, passwordHash);
+		AppUser user = UserMapper.toEntity(userDto, username, email, passwordHash);
 
-		return repository.save(user);
+		try {
+			return repository.saveAndFlush(user);
+		} catch (DataIntegrityViolationException ex) {
+			// A concurrent registration can pass the checks above and still hit the unique constraints
+			String constraintName = ex.getCause() instanceof ConstraintViolationException cve ? cve.getConstraintName() : null;
+			if (USERNAME_UNIQUE_INDEX.equals(constraintName)) {
+				throw new UserAlreadyExistsException("Username already exists", ex);
+			}
+			if (EMAIL_UNIQUE_CONSTRAINT.equals(constraintName)) {
+				throw new UserAlreadyExistsException("Email already exists", ex);
+			}
+			throw ex;
+		}
 	}
 
 	/**

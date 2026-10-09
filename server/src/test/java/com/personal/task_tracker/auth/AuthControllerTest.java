@@ -15,7 +15,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -24,10 +26,15 @@ import java.util.Locale;
 
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers
@@ -42,7 +49,7 @@ class AuthControllerTest {
 	@ServiceConnection
 	static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
 
-	@Autowired
+	@MockitoSpyBean
 	private UserRepository repository;
 
 	@Autowired
@@ -106,7 +113,8 @@ class AuthControllerTest {
 				.post("/api/auth/register")
 				.then()
 				.statusCode(409)
-				.body("error", equalTo("Username already exists"));
+				.contentType("application/problem+json")
+				.body("detail", equalTo("Username already exists"));
 
 		assertThat(repository.count()).isEqualTo(1);
 	}
@@ -122,9 +130,137 @@ class AuthControllerTest {
 				.post("/api/auth/register")
 				.then()
 				.statusCode(409)
-				.body("error", equalTo("Email already exists"));
+				.body("detail", equalTo("Email already exists"));
 
 		assertThat(repository.count()).isEqualTo(1);
+	}
+
+	@Test
+	void shouldReturn409WhenUsernameDiffersOnlyByCase() {
+		saveUser("JDoe", "jdoe@mail.com");
+
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("jdoe", "other@mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(409)
+				.body("detail", equalTo("Username already exists"));
+
+		assertThat(repository.count()).isEqualTo(1);
+	}
+
+	@Test
+	void shouldReturn409WhenEmailDiffersOnlyByCase() {
+		saveUser("jdoe", "jdoe@mail.com");
+
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("other", "JDoe@Mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(409)
+				.body("detail", equalTo("Email already exists"));
+
+		assertThat(repository.count()).isEqualTo(1);
+	}
+
+	@Test
+	void shouldReturn409WhenSameMixedCaseEmailIsRegisteredTwice() {
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("jdoe", "JDoe@Mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(201);
+
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("other", "JDoe@Mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(409)
+				.body("detail", equalTo("Email already exists"));
+
+		assertThat(repository.count()).isEqualTo(1);
+	}
+
+	@Test
+	void shouldKeepUsernameCaseAndStoreLowercaseEmail() {
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("  JDoe  ", "JDoe@Mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(201)
+				.body("username", equalTo("JDoe"))
+				.body("email", equalTo("jdoe@mail.com"));
+
+		AppUser storedUser = repository.findByEmail("jdoe@mail.com").orElseThrow();
+		assertThat(storedUser.getUsername()).isEqualTo("JDoe");
+	}
+
+	@Test
+	void shouldRejectUsernameDifferingOnlyByCaseAtDatabaseLevel() {
+		saveUser("JDoe", "jdoe@mail.com");
+
+		assertThatThrownBy(() -> saveUser("jdoe", "other@mail.com"))
+				.isInstanceOf(DataIntegrityViolationException.class);
+	}
+
+	@Test
+	void shouldReturn409WhenConcurrentRegistrationHitsUsernameIndex() {
+		saveUser("JDoe", "jdoe@mail.com");
+		// Simulates a concurrent registration: the check passes, the insert hits the unique index
+		doReturn(false).when(repository).existsByUsernameIgnoreCase(anyString());
+
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("jdoe", "other@mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(409)
+				.contentType("application/problem+json")
+				.body("detail", equalTo("Username already exists"));
+
+		assertThat(repository.count()).isEqualTo(1);
+	}
+
+	@Test
+	void shouldReturn409WhenConcurrentRegistrationHitsEmailConstraint() {
+		saveUser("jdoe", "jdoe@mail.com");
+		// Simulates a concurrent registration: the check passes, the insert hits the unique constraint
+		doReturn(false).when(repository).existsByEmail(anyString());
+
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("other", "jdoe@mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(409)
+				.body("detail", equalTo("Email already exists"));
+
+		assertThat(repository.count()).isEqualTo(1);
+	}
+
+	@Test
+	void shouldReturn500WhenAnotherConstraintIsViolated() {
+		doThrow(new DataIntegrityViolationException("other constraint")).when(repository).saveAndFlush(any());
+
+		given()
+				.contentType(ContentType.JSON)
+				.body(registerRequest("jdoe", "jdoe@mail.com", RAW_PASSWORD))
+				.when()
+				.post("/api/auth/register")
+				.then()
+				.statusCode(500);
 	}
 
 	@Test
@@ -136,7 +272,7 @@ class AuthControllerTest {
 				.post("/api/auth/register")
 				.then()
 				.statusCode(400)
-				.body("email", equalTo("must be a well-formed email address"));
+				.body("errors.email", equalTo("must be a well-formed email address"));
 
 		assertThat(repository.count()).isZero();
 	}
@@ -150,11 +286,11 @@ class AuthControllerTest {
 				.post("/api/auth/register")
 				.then()
 				.statusCode(400)
-				.body("firstname", equalTo("must not be blank"))
-				.body("lastname", equalTo("must not be blank"))
-				.body("username", equalTo("must not be blank"))
-				.body("email", equalTo("must not be blank"))
-				.body("password", equalTo("must not be blank"));
+				.body("errors.firstname", equalTo("must not be blank"))
+				.body("errors.lastname", equalTo("must not be blank"))
+				.body("errors.username", equalTo("must not be blank"))
+				.body("errors.email", equalTo("must not be blank"))
+				.body("errors.password", equalTo("must not be blank"));
 	}
 
 	@ParameterizedTest
@@ -179,7 +315,7 @@ class AuthControllerTest {
 				.post("/api/auth/register")
 				.then()
 				.statusCode(400)
-				.body("password", equalTo("size must be between 8 and 72"));
+				.body("errors.password", equalTo("size must be between 8 and 72"));
 
 		assertThat(repository.count()).isZero();
 	}
