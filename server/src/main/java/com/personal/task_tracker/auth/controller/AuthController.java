@@ -1,5 +1,6 @@
 package com.personal.task_tracker.auth.controller;
 
+import com.personal.task_tracker.auth.dto.LoginRequestDto;
 import com.personal.task_tracker.auth.dto.RegisterRequestDto;
 import com.personal.task_tracker.auth.dto.RegisterResponseDto;
 import com.personal.task_tracker.auth.service.AuthService;
@@ -30,4 +31,12 @@ public class AuthController {
 		RegisterResponseDto registerResponseDto = service.register(userDto);
 		return new ResponseEntity<>(registerResponseDto, HttpStatus.CREATED);
 	}
+
+//	@PostMapping("/login")
+//	public ResponseEntity<Object> login(
+//			@RequestBody @Valid LoginRequestDto userDto
+//	) {
+//		service.login(userDto);
+//		return new ResponseEntity<>(HttpStatus.OK);
+//	}
 }

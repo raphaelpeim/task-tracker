@@ -1,5 +1,6 @@
 package com.personal.task_tracker.auth.service;
 
+import com.personal.task_tracker.auth.dto.LoginRequestDto;
 import com.personal.task_tracker.auth.dto.RegisterRequestDto;
 import com.personal.task_tracker.auth.dto.RegisterResponseDto;
 import com.personal.task_tracker.auth.mapper.AuthMapper;
@@ -19,12 +20,21 @@ public class AuthService {
 	/**
 	 * Register a new user
 	 *
-	 * @param registerRequestDto new user data
+	 * @param userDto new user data
 	 * @return the created user
 	 */
 	@Transactional
-	public RegisterResponseDto register(RegisterRequestDto registerRequestDto) {
-		AppUser createdUser = userService.createUser(AuthMapper.toUserCreateDto(registerRequestDto));
+	public RegisterResponseDto register(RegisterRequestDto userDto) {
+		AppUser createdUser = userService.createUser(AuthMapper.toUserCreateDto(userDto));
 		return AuthMapper.toRegisterResponseDto(createdUser);
 	}
+
+//	/**
+//	 * Check credentials and create the token
+//	 * @param userDto credentials initial
+//	 */
+//	@Transactional
+//	public void login(LoginRequestDto userDto) {
+//		AppUser createdUser = userService.createUser(AuthMapper.toUserCreateDto(userDto));
+//	}
 }

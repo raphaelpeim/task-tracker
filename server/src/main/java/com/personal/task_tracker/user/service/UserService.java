@@ -1,5 +1,6 @@
 package com.personal.task_tracker.user.service;
 
+import com.personal.task_tracker.auth.dto.LoginRequestDto;
 import com.personal.task_tracker.user.dto.UserCreateDto;
 import com.personal.task_tracker.user.dto.UserResponseDto;
 import com.personal.task_tracker.user.entity.AppUser;
@@ -89,6 +90,14 @@ public class UserService {
 			}
 			throw exception;
 		}
+	}
+
+	/**
+	 * Check credentials and create the token
+	 * @param userDto credentials
+	 */
+	public void login(LoginRequestDto userDto) {
+
 	}
 
 	/**
