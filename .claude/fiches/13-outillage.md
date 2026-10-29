@@ -6,6 +6,8 @@
 - Ce que `.gitignore` protège, et pourquoi c'est une question de sécurité
 - Les outils du quotidien : Maven Wrapper, DevTools, le profil `local`
 - Les conventions qui rendent le projet lisible : commits, README, JOURNAL
+- Ce qui se passe sous le capot : les deux chargeurs de classes de DevTools et son redémarrage, ce que Compose crée
+  et comment il retrouve ses conteneurs, le conteneur Ryuk de Testcontainers, le mode du Maven Wrapper
 
 **Prérequis** : [01. Maven et le pom.xml](01-maven-pom.md), [03. Configuration](03-configuration.md).
 
@@ -178,7 +180,7 @@ Extraits de `.gitignore` :
 
 ```gitignore
 server/target/                                       # :56  généré par Maven
-server/.mvn/wrapper/maven-wrapper.jar                # :57  retéléchargé par mvnw
+server/.mvn/wrapper/maven-wrapper.jar                # :57  inutilisé ici (wrapper en mode only-script), voir 4.4
 server/src/main/resources/application-*.properties   # :58  configurations locales Spring
 .env                                                 # :90  variables Docker
 *.pem                                                # :93  clés et certificats
@@ -248,7 +250,220 @@ Ce dernier point est une bonne pratique : on ne réécrit pas l'histoire, on not
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Les sections précédentes disent **à quoi servent** les outils. Celle-ci montre **comment ils fonctionnent**, avec de
+quoi l'observer sur ta machine. Même plan que la fiche 02 : le mécanisme réel, comment l'observer, la source, et ce
+qui se passe sans.
+
+Pour les observations DevTools, l'application doit tourner avec `./mvnw spring-boot:run` (commande du README).
+`jcmd`, utilisé plus bas, est fourni avec le JDK ; `jcmd` sans argument liste les JVM en cours et leur PID.
+
+### 4.1 DevTools : deux chargeurs de classes, un seul redémarrage partiel
+
+**Le mécanisme.** En Java, une classe est chargée par un *chargeur de classes* (`ClassLoader`), et une classe déjà
+chargée ne peut pas être remplacée. Pour prendre en compte une modification, il faut donc jeter le chargeur
+entier et en créer un neuf. DevTools répartit les classes entre deux chargeurs :
+
+| Chargeur | Ce qu'il charge | Au redémarrage |
+|---|---|---|
+| `AppClassLoader` (le chargeur standard de Java) | les jars des dépendances : Spring, Hibernate, Tomcat... | conservé |
+| `RestartClassLoader` (créé par DevTools) | le dossier `target/classes` : **tes** classes | jeté, puis recréé |
+
+Quand des fichiers changent dans `target/classes`, DevTools ferme le contexte Spring, abandonne le
+`RestartClassLoader`, en crée un nouveau et relance `main` dans le **même** processus Java. Les milliers de classes
+des bibliothèques, déjà chargées et optimisées par la JVM, restent en place : c'est tout le gain.
+
+DevTools ne surveille pas tes fichiers `.java` : il surveille le classpath. Il faut donc **recompiler** (l'IDE le
+fait à l'enregistrement si la compilation automatique est activée, sinon `./mvnw compile`) pour déclencher le
+redémarrage.
+
+**L'observer.** Lance l'application avec `-Dspring-boot.run.arguments=--logging.level.org.springframework.boot.devtools=DEBUG`
+en plus des arguments du README. Extraits réels, relevés sur le projet :
+
+```
+[  restartedMain] o.s.b.devtools.restart.ChangeableUrls    : Matching URLs for reloading : [file:/.../server/target/classes/]
+...
+[  restartedMain] c.p.task_tracker.TaskTrackerApplication  : Started TaskTrackerApplication in 1.782 seconds (process running for 1.934)
+```
+
+Le nom du thread, `restartedMain` au lieu de `main`, est la signature de DevTools. `Matching URLs for reloading`
+indique ce qui ira dans le `RestartClassLoader` : `target/classes` seulement.
+
+Modifie une classe et recompile (`./mvnw compile` dans un autre terminal). Suite du log :
+
+```
+[   File Watcher] rtingClassPathChangeChangedEventListener : Restarting due to 34 class path changes (0 additions, 0 deletions, 34 modifications)
+[       Thread-1] o.s.boot.devtools.restart.Restarter      : Stopping application
+[       Thread-1] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Shutdown completed.
+...
+[  restartedMain] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Starting...
+[  restartedMain] c.p.task_tracker.TaskTrackerApplication  : Started TaskTrackerApplication in 0.317 seconds (process running for 57.481)
+```
+
+Trois choses à lire : 0,3 seconde au lieu de 1,8 ; `process running for 57.481` prouve que c'est le **même**
+processus (le PID ne change pas non plus) ; `HikariPool-2` montre que le contexte Spring, lui, est entièrement
+reconstruit (nouveau pool de connexions, Flyway revérifie les migrations). Le nombre de changements dépend de ce que
+le compilateur a réécrit.
+
+Pour voir les chargeurs eux-mêmes, `jcmd <pid> VM.classloaders` pendant que l'application tourne, après un
+redémarrage. Extrait réel :
+
+```
++-- "app", jdk.internal.loader.ClassLoaders$AppClassLoader
+      |
+      +-- org.springframework.boot.devtools.restart.classloader.RestartClassLoader
+      |     |
+      |     +-- org.springframework.boot.tomcat.TomcatEmbeddedWebappClassLoader
+      |
+      +-- net.bytebuddy.utility.dispatcher.JavaDispatcher$DynamicClassLoader
+      |
+      +-- org.springframework.boot.devtools.restart.classloader.RestartClassLoader
+            |
+            +-- org.springframework.boot.tomcat.TomcatEmbeddedWebappClassLoader
+```
+
+Deux `RestartClassLoader` : l'ancien n'a pas encore été nettoyé par le ramasse-miettes, le nouveau sert. Avec
+`jcmd <pid> VM.classloaders show-classes=true`, tu vérifies que `com.personal.task_tracker.task.service.TaskService`
+(et son proxy `TaskService$$SpringCGLIB$$0`, voir [02. Beans et injection](02-beans-injection.md), section 4.4) est
+chargé **une fois dans chaque** `RestartClassLoader`, tandis que les classes de Spring, comme `DispatcherServlet`,
+sont sous `AppClassLoader`.
+
+**La conséquence à connaître.** Une même classe chargée par deux chargeurs différents, ce sont **deux classes
+différentes** pour la JVM. Si une bibliothèque garde en mémoire un objet créé avant le redémarrage (un cache, par
+exemple), tu peux obtenir un `ClassCastException` du type "`TaskService` ne peut pas être converti en
+`TaskService`". La documentation de DevTools décrit ces limites et comment désactiver le redémarrage pour
+diagnostiquer.
+
+**La source.** [Developer Tools](https://docs.spring.io/spring-boot/reference/using/devtools.html), sections
+"Automatic Restart" et "Restart vs Reload".
+
+### 4.2 Comment DevTools s'active, et pourquoi il disparaît en production
+
+**Le mécanisme.** DevTools ne demande aucune annotation. Son jar contient un fichier
+`META-INF/spring.factories` que Spring Boot lit au démarrage. Il y déclare notamment :
+
+```properties
+org.springframework.context.ApplicationListener=\
+org.springframework.boot.devtools.logger.DevToolsLogFactory$Listener,\
+org.springframework.boot.devtools.restart.RestartApplicationListener
+
+org.springframework.boot.EnvironmentPostProcessor=\
+org.springframework.boot.devtools.env.DevToolsHomePropertiesPostProcessor,\
+org.springframework.boot.devtools.env.DevToolsPropertyDefaultsPostProcessor
+```
+
+`RestartApplicationListener` est appelé avant même la création du contexte. Si les conditions sont réunies, il
+interrompt le démarrage sur le thread `main` et relance tout dans un thread `restartedMain`, avec le
+`RestartClassLoader`. Le log DEBUG le dit : `Creating new Restarter for thread Thread[#3,main,5,main]` puis
+`Immediately restarting application`. C'est pour cela que `jcmd` montre aussi `TaskTrackerApplication` chargée par
+`AppClassLoader` : c'est la trace de ce tout premier lancement abandonné.
+
+`DevToolsPropertyDefaultsPostProcessor` ajoute des **valeurs par défaut de développement**. Le log l'annonce :
+`Devtools property defaults active! Set 'spring.devtools.add-properties' to 'false' to disable`. Avec Spring Boot 4,
+chaque module apporte les siennes dans un fichier `META-INF/spring-devtools.properties`. Contenu réel de deux d'entre
+eux :
+
+```properties
+# spring-boot-webmvc-4.1.1.jar
+defaults.spring.mvc.log-resolved-exception=true
+
+# spring-boot-autoconfigure-4.1.1.jar
+defaults.spring.template.provider.cache=false
+defaults.spring.web.error.include-binding-errors=always
+defaults.spring.web.error.include-message=always
+defaults.spring.web.error.include-stacktrace=always
+defaults.spring.web.resources.cache.period=0
+defaults.spring.web.resources.chain.cache=false
+```
+
+Conséquence : avec DevTools, les pages d'erreur par défaut de Spring Boot sont plus bavardes (message, détails,
+pile d'appels) qu'en production. Le projet renvoie ses propres réponses d'erreur via `GlobalExceptionHandler`, mais
+une erreur qui lui échapperait serait affichée différemment selon que DevTools est présent ou non.
+
+**Quand DevTools est inactif.** Vérifié sur le projet dans les deux cas :
+
+- **dans les tests** : les logs d'un `./mvnw test` montrent le thread `main`, jamais `restartedMain`, et aucun
+  message `Devtools property defaults` ;
+- **avec `java -jar`** : DevTools n'est même pas dans le jar (le plugin l'exclut, voir
+  [01. Maven et le pom.xml](01-maven-pom.md), section 4.7). L'application démarre sur le thread `main`, et `jcmd`
+  montre `LaunchedClassLoader` à la place des `RestartClassLoader`.
+
+C'est le rôle du `<optional>true</optional>` et du scope `runtime` vus en section 3 : DevTools est présent pour
+`spring-boot:run`, absent de tout ce qui part en production.
+
+**Si on le retire.** Rien ne casse : l'application démarre normalement, sur le thread `main`. Tu perds le
+redémarrage automatique (il faut arrêter et relancer à la main, environ 1,8 seconde de démarrage contre 0,3) et les
+valeurs par défaut de développement.
+
+**La source.** [Developer Tools](https://docs.spring.io/spring-boot/reference/using/devtools.html), sections
+"Property Defaults" et "Automatic Restart".
+
+### 4.3 Docker Compose ne garde aucun état : il retrouve tout par des étiquettes
+
+**Le mécanisme.** Compose ne tient pas de registre de "ses" conteneurs. À chaque `docker compose up`, il calcule le
+**nom de projet**, puis demande à Docker les conteneurs, volumes et réseaux qui portent l'étiquette
+`com.docker.compose.project=<nom>`. Le nom de projet vient ici de la ligne `name: task-tracker` ; sans elle, ce
+serait le nom du **dossier** qui contient le fichier compose. Tous les noms en découlent :
+
+| Ressource | Nom réel | Construit à partir de |
+|---|---|---|
+| Conteneur | `task-tracker-postgres-1` | projet + service + numéro |
+| Volume | `task-tracker_postgres_data` | projet + volume déclaré |
+| Réseau | `task-tracker_default` | projet + `default` (créé automatiquement, jamais déclaré dans le fichier) |
+
+Le réseau `default` est un réseau privé que Compose crée pour le projet : les services d'un même fichier s'y
+joignent par leur nom (un futur service `api` pourrait joindre la base à l'adresse `postgres:5432`).
+
+Fixer `name:` a une conséquence : le nom ne dépend plus du dossier. Une seconde copie du dépôt (un autre clone, un
+*worktree* git) qui lancerait `docker compose up` viserait **le même** projet, donc le même conteneur et le même
+volume de données.
+
+**L'observer.** Sans rien démarrer, et sans afficher les variables d'environnement :
+
+```bash
+docker network ls --format '{{.Name}}' | grep task-tracker
+docker volume inspect task-tracker_postgres_data --format '{{.Mountpoint}} {{json .Labels}}'
+docker inspect task-tracker-postgres-1 --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+```
+
+La dernière commande affiche les **deux** fichiers que Compose a fusionnés : `docker-compose.yml` et
+`docker-compose.override.yml`. C'est la preuve concrète de l'override décrit en 2.2. La deuxième montre un
+`Mountpoint` en `/var/lib/docker/volumes/task-tracker_postgres_data/_data` : sur macOS, ce chemin n'existe pas sur
+ton disque, il est dans la machine virtuelle Linux de Docker Desktop. C'est pourquoi on manipule les données par
+`docker compose exec ... psql` et non en ouvrant un dossier.
+
+**La source.** [Specify a project name](https://docs.docker.com/compose/how-tos/project-name/),
+[Networking in Compose](https://docs.docker.com/compose/how-tos/networking/),
+[Merge Compose files](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/),
+[Interpolation](https://docs.docker.com/reference/compose-file/interpolation/).
+
+### 4.4 Les compagnons invisibles : Ryuk et le Maven Wrapper
+
+**Ryuk, le nettoyeur de Testcontainers.** Pendant un `./mvnw test`, `docker ps` montre **deux** conteneurs, pas un :
+
+```
+clever_kilby postgres:16-alpine Up 2 seconds
+testcontainers-ryuk-e52e94b1-6298-4088-aaa3-49af1c573af8 testcontainers/ryuk:0.14.0 Up 3 seconds
+```
+
+Le premier est la base de `TestcontainersConfiguration` (nom aléatoire attribué par Docker). Le second est démarré
+par Testcontainers lui-même : Ryuk garde une connexion ouverte avec la JVM des tests et, quand elle se termine
+(normalement ou pas, même après un arrêt brutal), supprime les conteneurs qu'elle avait créés. Sans lui, un test
+interrompu laisserait des bases PostgreSQL orphelines tourner sur ta machine. Comment Spring branche ensuite la
+datasource sur ce conteneur (`@ServiceConnection`) est expliqué dans [11. Tests](11-tests.md).
+Source : [Testcontainers : Custom configuration](https://java.testcontainers.org/features/configuration/)
+(section sur Ryuk).
+
+**Le mode du Maven Wrapper.** `server/.mvn/wrapper/maven-wrapper.properties` contient
+`distributionType=only-script` : tout est fait par le script `mvnw`, sans `maven-wrapper.jar`. La règle `:57` du
+`.gitignore` est donc une précaution pour un autre mode du wrapper ; aucun jar n'est téléchargé dans ce projet.
+Le détail de ce que fait le script (dossier `~/.m2/wrapper/dists`, `./mvnw -v`) est dans
+[01. Maven et le pom.xml](01-maven-pom.md), section 4.8. Source : [Maven Wrapper](https://maven.apache.org/tools/wrapper/).
+
+---
+
+## 5. À toi de jouer
 
 **Exercice 1 : explorer le conteneur.** Base démarrée :
 
@@ -287,7 +502,7 @@ explique les choix.
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -302,7 +517,7 @@ explique les choix.
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **Image Docker de l'application** ⏳ : `./mvnw spring-boot:build-image` construit une image de l'API (via les
   *buildpacks*), pour la déployer ou la lancer à côté de PostgreSQL dans le même compose.
@@ -313,12 +528,13 @@ explique les choix.
 - **Hooks git** : vérifier le format du message de commit ou l'absence de secret avant chaque commit.
 - **Gestion des secrets en production** : coffre de secrets (Vault, gestionnaire du cloud) plutôt que des fichiers.
 - **ADR** : formaliser les décisions importantes du journal en fiches courtes (contexte, décision, conséquences).
-- **Documentation officielle** : Docker Docs (« Compose file reference », « Merge Compose files »,
-  « Interpolation ») ; Spring Boot Reference, « Developer Tools » ; Apache Maven Wrapper ; conventionalcommits.org.
+- **Documentation officielle** : les liens de la section 4 (Developer Tools, nom de projet, réseau, fusion et
+  interpolation Compose, Ryuk, Maven Wrapper), la « Compose file reference » de Docker Docs, et
+  conventionalcommits.org.
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Quelle différence entre `docker compose down` et `docker compose down -v` ?**
 

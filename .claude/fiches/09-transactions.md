@@ -6,6 +6,9 @@
 - Ce que changent `readOnly`, la propagation et les règles de rollback.
 - Pourquoi le projet désactive l'Open Session In View, et ce que ça impose.
 - Pourquoi une transaction ne suffit pas contre deux requêtes simultanées.
+- Ce qui se passe réellement, logs à l'appui : la transaction rangée dans le thread, la propagation, ce que fait
+  vraiment `readOnly`, le flush au commit, l'auto-invocation et le rollback des tests, puis un `@Transactional` à
+  écrire toi-même.
 
 **Prérequis** : [02. Beans et injection](02-beans-injection.md) (la notion de proxy),
 [08. Persistance](08-persistance.md) (contexte de persistance, flush, LAZY).
@@ -106,8 +109,9 @@ Avantage : impossible d'oublier la transaction sur une lecture, et chaque écrit
 
 C'est une **indication**, pas une interdiction absolue. Elle permet à Spring et Hibernate d'optimiser : en
 lecture seule, Hibernate n'a pas besoin de faire de flush, donc pas de dirty checking à la fin. Selon la base et le
-driver, la connexion peut aussi être passée en mode lecture seule. Ne compte pas dessus comme mécanisme de
-sécurité ; c'est surtout une optimisation et une documentation de l'intention.
+driver, la connexion peut aussi être passée en mode lecture seule : c'est le cas avec PostgreSQL dans ce projet
+(voir 4.4). Ne compte pas dessus comme mécanisme de sécurité : une entité modifiée dans une transaction `readOnly`
+n'est simplement pas écrite, sans erreur. C'est surtout une optimisation et une documentation de l'intention.
 
 ### 2.5 Les règles de rollback
 
@@ -186,7 +190,7 @@ Avec `spring.jpa.open-in-view=false`, la session se ferme à la fin de la métho
 une relation non chargée lève :
 
 ```
-org.hibernate.LazyInitializationException: could not initialize proxy [...AppUser#1] - no Session
+org.hibernate.LazyInitializationException: Could not initialize proxy [com.personal.task_tracker.user.entity.AppUser#1] - no session
 ```
 
 La règle qui en découle : **le service renvoie des DTO complets**, construits à l'intérieur de la transaction. Le
@@ -328,7 +332,453 @@ utilisateurs). Conséquence directe du §2.9.
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+La fiche [02. Beans et injection](02-beans-injection.md) a déjà montré **qui** intercepte l'appel : un proxy CGLIB
+généré autour de `TaskService`, avec `TransactionInterceptor` dans la pile d'appels et le log de `getAllTasks()`
+(section 4.4). Cette section montre **ce que fait** ce proxy une fois appelé : où il range la transaction, comment
+les méthodes suivantes la retrouvent, et ce que changent réellement `readOnly`, la propagation et les exceptions.
+Même plan que dans la fiche 02 : le mécanisme, l'observer, ce qui se passerait sans, la source.
+
+Tous les extraits sont réels : ils viennent d'un test d'intégration temporaire lancé sur le projet (PostgreSQL 16
+via Testcontainers, Spring Framework 7.0.9, Hibernate 7.4.5), avec
+`logging.level.org.springframework.orm.jpa.JpaTransactionManager=DEBUG` et
+`logging.level.org.springframework.transaction.interceptor=TRACE`. Horodatages retirés, noms de classes raccourcis
+(`...`). Les lignes `@@@` sont des `System.out.println` du test. Quand le thread compte, il est indiqué entre
+crochets, comme dans le vrai log.
+
+Pour reproduire, en lançant l'application :
+`./mvnw spring-boot:run -Dspring-boot.run.profiles=local "-Dspring-boot.run.arguments=--logging.level.org.springframework.orm.jpa.JpaTransactionManager=DEBUG --logging.level.org.springframework.transaction.interceptor=TRACE"`
+
+### 4.1 Où est rangée la transaction courante : dans le thread
+
+**Le mécanisme.** Quand le proxy démarre une transaction, `JpaTransactionManager` :
+
+1. ouvre une session Hibernate (`EntityManager`) ;
+2. emprunte une connexion au pool Hikari et coupe son auto-commit ;
+3. range les deux dans `TransactionSynchronizationManager`, une classe de Spring qui n'est qu'un ensemble de
+   variables `ThreadLocal` : des cases mémoire propres à **chaque thread**.
+
+Ensuite, personne ne se passe la transaction en paramètre. Le repository, l'`EntityManager` injecté (un proxy partagé,
+voir [08. Persistance](08-persistance.md), section 4.4) ou un autre `@Transactional` regardent simplement dans le
+thread courant. Une requête HTTP étant traitée de bout en bout par un seul thread de Tomcat, tout fonctionne sans
+que tu y penses.
+
+**L'observer.** Le test affiche l'état de `TransactionSynchronizationManager` à différents moments :
+
+```
+@@@ [main] test method, no tx  active=false name=null readOnly=false resources=[]
+@@@ [main] outer  active=true name=...ProbeService.otherThread readOnly=false resources=[$Proxy174->EntityManagerHolder, HikariDataSource->ConnectionHolder]
+```
+
+Les deux ressources rangées dans le thread : l'`EntityManagerFactory` (vue à travers son proxy Spring) associée à la
+session ouverte, et la `HikariDataSource` associée à la connexion JDBC. Côté logs, c'est la paire
+`Opened new EntityManager [SessionImpl(...)] for JPA transaction` puis
+`Exposing JPA transaction as JDBC [...HibernateConnectionHandle@...]` au démarrage, et
+`Found thread-bound EntityManager [SessionImpl(...)] for JPA transaction` chaque fois que quelqu'un vient la chercher.
+"Thread-bound" : attachée au thread.
+
+**Pourquoi ça casse avec un autre thread.** Vérifié : une méthode `@Transactional` enregistre un utilisateur
+`outer`, lance un thread qui enregistre un utilisateur `worker`, attend sa fin, puis lève une `RuntimeException`.
+
+```
+@@@ [main]          outer  active=true ... resources=[$Proxy174->EntityManagerHolder, HikariDataSource->ConnectionHolder]
+    [main]          insert into app_user (...)
+@@@ [worker-thread] worker active=false name=null readOnly=false resources=[]
+    [worker-thread] Creating new transaction with name [...SimpleJpaRepository.save]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+    [worker-thread] insert into app_user (...)
+    [worker-thread] Committing JPA transaction on EntityManager [SessionImpl(955850752<open>)]
+    [main]          Initiating transaction rollback
+    [main]          Rolling back JPA transaction on EntityManager [SessionImpl(1471794371<open>)]
+@@@ [main]          users after: [worker]
+```
+
+Le thread `worker-thread` trouve des cases vides : il ne voit pas la transaction de `main`. Le `save` de
+`SimpleJpaRepository` en ouvre donc une nouvelle (autre session, autre connexion), qui est validée tout de suite. Le
+rollback de `main` annule `outer`, mais `worker` reste en base. Même résultat avec tout ce qui change de thread :
+`@Async`, `CompletableFuture.supplyAsync(...)`, `parallelStream()`, un thread virtuel. Et c'est aussi pour cela que
+`@Transactional` sur un test ne couvre pas le thread de Tomcat (4.8).
+
+**La source.** [Synchronizing Resources with Transactions](https://docs.spring.io/spring-framework/reference/data-access/transaction/tx-resource-synchronization.html),
+[TransactionSynchronizationManager (javadoc)](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/support/TransactionSynchronizationManager.html),
+[Understanding the Spring Framework Transaction Abstraction](https://docs.spring.io/spring-framework/reference/data-access/transaction/strategies.html).
+
+### 4.2 La propagation, lue dans les logs
+
+**Le mécanisme.** À chaque méthode transactionnelle, le proxy demande une transaction au gestionnaire. Celui-ci
+regarde d'abord le thread (4.1) :
+
+- rien dans le thread : il en **crée** une (`Creating new transaction`) ;
+- une transaction existe et la propagation est `REQUIRED` : il la fait **rejoindre** (`Participating in existing
+  transaction`). Pas de nouvelle session, pas de nouvelle connexion, et surtout **pas de commit** à la fin de cette
+  méthode : seul celui qui a créé la transaction la valide ;
+- `REQUIRES_NEW` : il retire la transaction en cours du thread, la met de côté (`Suspending`), en ouvre une nouvelle,
+  puis remet l'ancienne en place (`Resuming`).
+
+**L'observer.** `AuthService.register`, appelée directement dans le test (log réel, complet) :
+
+```
+Creating new transaction with name [com.personal.task_tracker.auth.service.AuthService.register]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+Opened new EntityManager [SessionImpl(912577157<open>)] for JPA transaction
+Exposing JPA transaction as JDBC [org.springframework.orm.jpa.vendor.HibernateJpaDialect$HibernateConnectionHandle@827f9c8]
+Getting transaction for [com.personal.task_tracker.auth.service.AuthService.register]
+Found thread-bound EntityManager [SessionImpl(912577157<open>)] for JPA transaction
+Participating in existing transaction
+Getting transaction for [com.personal.task_tracker.user.service.UserService.createUser]
+No need to create transaction for [...SimpleJpaRepository.existsByUsernameIgnoreCase]: This method is not transactional.
+select au1_0.id from app_user au1_0 where upper(au1_0.username)=upper(?) fetch first ? rows only
+No need to create transaction for [...SimpleJpaRepository.existsByEmail]: This method is not transactional.
+select au1_0.id from app_user au1_0 where au1_0.email=? fetch first ? rows only
+Found thread-bound EntityManager [SessionImpl(912577157<open>)] for JPA transaction
+Participating in existing transaction
+Getting transaction for [...SimpleJpaRepository.saveAndFlush]
+insert into app_user (created_date,email,firstname,lastname,password,role,updated_date,username) values (?,?,?,?,?,?,?,?)
+Completing transaction for [...SimpleJpaRepository.saveAndFlush]
+Completing transaction for [com.personal.task_tracker.user.service.UserService.createUser]
+Completing transaction for [com.personal.task_tracker.auth.service.AuthService.register]
+Initiating transaction commit
+Committing JPA transaction on EntityManager [SessionImpl(912577157<open>)]
+Closing JPA EntityManager after transaction
+```
+
+À lire :
+
+- un seul `Creating new transaction`, un seul `Committing`, et le même numéro de session `SessionImpl(912577157)`
+  du début à la fin : c'est bien **une** transaction, comme annoncé en 3.3 ;
+- `createUser` et `saveAndFlush` "participent". Leur `Completing transaction` ne fait rien en base ;
+- les deux `existsBy...` sont marquées `This method is not transactional` : Spring Data ne met `@Transactional` que
+  sur les méthodes de `SimpleJpaRepository` (en `readOnly` pour les lectures), pas sur les méthodes que **tu**
+  déclares dans l'interface. Ici ce n'est pas un problème, elles s'exécutent dans la transaction de `register`. C'est
+  le même mécanisme qui fait rejoindre `SimpleJpaRepository.findAll` dans le log de la fiche 02 (section 4.4).
+
+Et `REQUIRES_NEW`, avec deux `TransactionTemplate` imbriqués (l'équivalent programmatique de `@Transactional`) :
+
+```
+Creating new transaction with name [outerTx]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+Opened new EntityManager [SessionImpl(867222659<open>)] for JPA transaction
+Suspending current transaction, creating new transaction with name [innerTx]
+Opened new EntityManager [SessionImpl(1965312210<open>)] for JPA transaction
+Committing JPA transaction on EntityManager [SessionImpl(1965312210<open>)]
+Resuming suspended transaction after completion of inner transaction
+Committing JPA transaction on EntityManager [SessionImpl(867222659<open>)]
+```
+
+Deux sessions, donc deux connexions empruntées **en même temps** : la transaction suspendue garde la sienne. Un
+`REQUIRES_NEW` appelé dans une boucle, sous charge, consomme deux connexions du pool par requête.
+
+**La source.** [Transaction Propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html),
+[Spring Data JPA : Transactionality](https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html).
+
+### 4.3 Le participant qui échoue : rollback-only
+
+**Le mécanisme.** Un participant (4.2) ne possède pas la transaction : il ne peut pas l'annuler lui-même. Quand une
+`RuntimeException` en sort, il pose un **drapeau** "à annuler" sur la transaction partagée. Le créateur, au moment de
+valider, voit le drapeau, annule, et lève `UnexpectedRollbackException` pour que l'annulation ne passe pas inaperçue.
+C'est le piège annoncé en 2.6.
+
+**L'observer.** Vérifié avec le vrai `UserService` : une méthode `@Transactional` appelle
+`userService.findUserById(999L)`, attrape la `UserNotFoundException` et continue normalement.
+
+```
+Participating in existing transaction
+Getting transaction for [com.personal.task_tracker.user.service.UserService.findUserById]
+select au1_0.id,...,au1_0.username from app_user au1_0 where au1_0.id=?
+Completing transaction for [...UserService.findUserById] after exception: com.personal.task_tracker.user.exception.UserNotFoundException: There is no user with id: 999
+Participating transaction failed - marking existing transaction as rollback-only
+Setting JPA transaction on EntityManager [SessionImpl(281586672<open>)] rollback-only
+@@@ caught UserNotFoundException
+@@@ end of catchAndContinue
+Initiating transaction commit
+Committing JPA transaction on EntityManager [SessionImpl(281586672<open>)]
+@@@ catchAndContinue threw org.springframework.transaction.UnexpectedRollbackException: Transaction silently rolled back because it has been marked as rollback-only
+```
+
+Deux remarques. `findUserById` est une simple **lecture** (`readOnly` hérité de la classe), et pourtant elle
+condamne toute la transaction. Et au niveau TRACE, l'intercepteur affiche aussi la pile complète de l'exception
+(`MethodRollbackEvent`) : ce n'est pas une erreur de plus, c'est la même.
+
+**La source.** [Transaction Propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html)
+(paragraphe "Understanding PROPAGATION_REQUIRED").
+
+### 4.4 Ce que fait vraiment `readOnly = true`
+
+**Le mécanisme.** `readOnly = true` agit à trois étages :
+
+1. **Spring** note l'information dans le thread (`TransactionSynchronizationManager.isCurrentTransactionReadOnly()`).
+2. **Hibernate** reçoit deux réglages : le flush mode de la session passe à `MANUAL` (plus aucun flush automatique,
+   donc plus de dirty checking au commit, voir [08. Persistance](08-persistance.md), section 4.5), et les entités
+   chargées sont marquées en lecture seule.
+3. **JDBC** : la connexion est passée en `setReadOnly(true)`. Le driver PostgreSQL (option `readOnlyMode`, qui vaut
+   `transaction` par défaut) ouvre alors la transaction avec `BEGIN READ ONLY`, et c'est **PostgreSQL** qui refuse
+   les écritures.
+
+**L'observer.** Dans une transaction `readOnly` :
+
+```
+@@@ flushMode=MANUAL defaultReadOnly=true
+@@@ jdbc readOnly=true
+org.hibernate.SQL : show transaction_read_only
+@@@ pg transaction_read_only=on
+@@@ entity readOnly in session=true
+```
+
+(respectivement `session.getHibernateFlushMode()`, `session.isDefaultReadOnly()`, `connection.isReadOnly()`, la
+commande PostgreSQL `show transaction_read_only`, et `session.isReadOnly(task)`).
+
+Deux conséquences vérifiées, très différentes :
+
+- modifier une entité chargée (`task.setTitle(...)`) : **aucun `UPDATE`, aucune erreur**, le titre en base reste
+  `Original`. Hibernate n'a simplement rien envoyé ;
+- enregistrer un **nouvel** utilisateur (`save`, donc `INSERT` immédiat à cause d'`IDENTITY`) : c'est PostgreSQL qui
+  refuse.
+  ```
+  WARN org.hibernate.orm.jdbc.error : HHH000247: ErrorCode: 0, SQLState: 25006
+  WARN org.hibernate.orm.jdbc.error : ERROR: cannot execute INSERT in a read-only transaction
+  @@@ RO insert threw org.springframework.orm.jpa.JpaSystemException: could not execute statement [ERROR: cannot execute INSERT in a read-only transaction] [insert into app_user ...]
+  ```
+
+D'où la nuance de 2.4 : dans ce projet, un SQL d'écriture qui part réellement est bloqué par la base, mais une
+modification d'entité est perdue en silence. Ce n'est pas une barrière, c'est une optimisation (pas de photo à
+comparer, pas de flush) doublée d'un filet.
+
+**La source.** [Using @Transactional, attribut readOnly](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html),
+[Driver PostgreSQL : paramètre readOnlyMode](https://jdbc.postgresql.org/documentation/use/),
+[Spring Data JPA : Transactionality](https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html).
+
+### 4.5 Exception vérifiée ou non : la règle exacte
+
+**Le mécanisme.** Dans son bloc `catch`, l'intercepteur demande à l'attribut de transaction
+`rollbackOn(exception)`. La règle par défaut : `true` si l'exception est une `RuntimeException` ou une `Error`,
+`false` sinon. Si c'est `false`, il **valide**, puis laisse l'exception remonter quand même. C'est une convention
+héritée des EJB : une exception vérifiée est vue comme un résultat métier prévu, pas comme une panne.
+
+**L'observer.** Deux méthodes qui enregistrent un utilisateur puis lèvent une exception :
+
+```
+Completing transaction for [...ProbeService.saveThenChecked] after exception: java.lang.Exception: checked
+Initiating transaction commit
+Committing JPA transaction on EntityManager [SessionImpl(1820021131<open>)]
+...
+Completing transaction for [...ProbeService.saveThenUnchecked] after exception: java.lang.IllegalStateException: unchecked
+Initiating transaction rollback
+Rolling back JPA transaction on EntityManager [SessionImpl(1470961753<open>)]
+@@@ users after: [checked]
+```
+
+L'utilisateur `checked` est **en base**, alors que la méthode a échoué. Si `TaskNotFoundException` ou
+`UserAlreadyExistsException` étaient des exceptions vérifiées, c'est ce qui arriverait aux écritures faites avant
+elles. C'est la raison technique du choix de [07. Exceptions](07-exceptions.md).
+
+**La source.** [Rolling Back a Declarative Transaction](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/rolling-back.html),
+[Declarative Transaction Management](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative.html)
+("follows EJB convention").
+
+### 4.6 Le flush a lieu **pendant** le commit
+
+**Le mécanisme.** Au commit, `JpaTransactionManager` demande à Hibernate de valider. Hibernate fait alors le flush
+(dirty checking, envoi des `UPDATE` en attente), **puis** le `COMMIT` sur la connexion JDBC. Tout cela se passe dans le
+proxy, **après** le retour de ta méthode.
+
+**L'observer.** Une entité chargée et modifiée, sans `save` ni `flush` :
+
+```
+select t1_0.id,...,t1_0.updated_date from task t1_0 where t1_0.id=?
+@@@ end of callback
+Initiating transaction commit
+Committing JPA transaction on EntityManager [SessionImpl(1562081879<open>)]
+update task set assignee_id=?,description=?,priority=?,status=?,title=?,type=?,updated_date=? where id=?
+Closing JPA EntityManager after transaction
+```
+
+L'`UPDATE` apparaît **après** `Committing` : il fait partie du commit. Conséquence directe : si cet `UPDATE` viole une
+contrainte, l'exception naît dans le proxy, hors de ton code, et aucun `try/catch` de ta méthode ne peut l'attraper.
+C'est pour cela que `UserService.createUser` utilise `saveAndFlush` dans son `try` (3.4), et que
+`TaskService.updateTask` appelle `repository.flush()` avant de construire la réponse
+([08. Persistance](08-persistance.md), section 3.5).
+
+**La source.** [Hibernate User Guide : Flushing](https://docs.hibernate.org/orm/7.4/userguide/html_single/#flushing),
+[COMMIT flush mode](https://docs.hibernate.org/orm/7.4/userguide/html_single/#flushing-commit).
+
+### 4.7 L'auto-invocation, démontrée
+
+**Le mécanisme.** Rappel de 02 (section 4.4) : dans le vrai objet, `this` désigne l'objet, pas le proxy. Un appel
+`this.methode()` ne passe donc jamais par `TransactionInterceptor`.
+
+**L'observer.** Un bean de test (classe générée `ProbeService$$SpringCGLIB$$0`, donc bien proxifié) avec une méthode
+`@Transactional(readOnly = true)` `outerReadOnly` qui appelle `this.innerWrite(id)`, elle-même `@Transactional`
+(lecture-écriture) et qui modifie le titre d'une tâche :
+
+```
+Creating new transaction with name [...ProbeService.outerReadOnly]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT,readOnly
+Getting transaction for [...ProbeService.outerReadOnly]
+select t1_0.id,... from task t1_0 where t1_0.id=?
+@@@ innerWrite active=true name=...ProbeService.outerReadOnly readOnly=true ...
+Completing transaction for [...ProbeService.outerReadOnly]
+Committing JPA transaction on EntityManager [SessionImpl(1456338587<open>)]
+@@@ title after self-invocation: Original
+```
+
+Aucune ligne `Getting transaction for [...innerWrite]` : l'intercepteur n'a jamais vu l'appel. `innerWrite` tourne
+dans la transaction **readOnly** de `outerReadOnly` (le nom l'indique), et sa modification est perdue sans erreur
+(4.4). Le même `innerWrite` appelé **depuis l'extérieur**, donc via le proxy :
+
+```
+Creating new transaction with name [...ProbeService.innerWrite]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+@@@ innerWrite active=true name=...ProbeService.innerWrite readOnly=false ...
+Committing JPA transaction on EntityManager [SessionImpl(942009127<open>)]
+update task set assignee_id=?,description=?,priority=?,status=?,title=?,type=?,updated_date=? where id=?
+@@@ title after direct call: Written
+```
+
+C'est exactement la réponse de l'exercice 3, observée.
+
+**La source.** [Using @Transactional](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html)
+(passage sur le mode proxy : "self-invocation").
+
+### 4.8 `@Transactional` sur un test : ce qui est vraiment annulé
+
+**Le mécanisme.** Sur une méthode de test, `@Transactional` est lu par `TransactionalTestExecutionListener` (pas par
+un proxy) : il ouvre une transaction dans le **thread du test** avant la méthode (et avant les `@BeforeEach`), et
+l'annule après (et après les `@AfterEach`). D'après 4.1, elle ne peut donc concerner que ce qui s'exécute dans ce
+thread.
+
+**L'observer.** Vérifié avec un test temporaire annoté `@Transactional` : il enregistre `direct` via le repository,
+puis appelle `POST /api/auth/register` pour `viahttp`.
+
+```
+[main]            Began transaction (1) for test class [...TmpProbeTransactionTest]; test method [f_transactionalTest]; transaction manager [org.springframework.orm.jpa.JpaTransactionManager@b230f87]; rollback [true]
+[main]            insert into app_user (...)
+[o-auto-1-exec-1] Creating new transaction with name [com.personal.task_tracker.auth.service.AuthService.register]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT
+[o-auto-1-exec-1] insert into app_user (...)
+[o-auto-1-exec-1] Committing JPA transaction on EntityManager [SessionImpl(150125881<open>)]
+@@@ [main]        users seen in test tx: [direct, viahttp]
+[main]            Rolling back JPA transaction on EntityManager [SessionImpl(84613866<open>)]
+[main]            Rolled back transaction (1) for test class [...TmpProbeTransactionTest]; test method [f_transactionalTest]
+@@@ [main]        users after test rollback: [viahttp]
+```
+
+`o-auto-1-exec-1` est un thread de Tomcat (`http-nio-auto-1-exec-1`, tronqué par le format de log). Il ne voit pas la
+transaction du test, en ouvre une et la valide : `viahttp` survit au rollback, `direct` disparaît. Autre piège
+visible dans le même log : le `@AfterEach` d'`IntegrationTest` s'exécute **dans** la transaction du test, donc son
+`deleteAll()` est annulé lui aussi (ses `select` partent, aucun `delete`). Les deux raisons pour lesquelles le projet
+nettoie la base sans `@Transactional` (§2.9 et 3.6).
+
+**La source.** [Spring TestContext : Transaction Management](https://docs.spring.io/spring-framework/reference/testing/testcontext-framework/tx.html),
+[Spring Boot : Testing Spring Boot Applications](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html)
+("the HTTP client and server run in separate threads and, thus, in separate transactions").
+
+### 4.9 Le refaire toi-même : un `@Transactional` en 70 lignes
+
+Proxy, `ThreadLocal`, propagation `REQUIRED`, règle de rollback, auto-invocation : tout tient dans un fichier. Écris-le
+**hors du projet** et lance-le avec `java MiniTx.java`. Pas de base de données : la "transaction" est un simple nom.
+
+```java
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+
+public class MiniTx {
+
+	@Retention(RetentionPolicy.RUNTIME)
+	@interface Tx {
+	}
+
+	// La transaction courante, rangée dans le thread (comme TransactionSynchronizationManager)
+	static final ThreadLocal<String> current = new ThreadLocal<>();
+	static int counter = 0;
+
+	interface Service {
+		@Tx
+		void outer();
+
+		@Tx
+		void inner();
+	}
+
+	static class RealService implements Service {
+		public void outer() {
+			System.out.println("  outer() dans " + current.get());
+			inner();                                                  // this.inner() : ne passe pas par le proxy
+		}
+
+		public void inner() {
+			System.out.println("  inner() dans " + current.get());
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	static <T> T transactional(T target, Class<T> type) {
+		return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> {
+			if (!method.isAnnotationPresent(Tx.class) || current.get() != null) {
+				if (current.get() != null) {
+					System.out.println("  " + method.getName() + " rejoint " + current.get());   // REQUIRED
+				}
+				return method.invoke(target, args);
+			}
+			current.set("tx-" + (++counter));
+			System.out.println("BEGIN " + current.get() + " pour " + method.getName());
+			try {
+				Object result = method.invoke(target, args);
+				System.out.println("COMMIT " + current.get());
+				return result;
+			} catch (InvocationTargetException e) {
+				boolean rollback = e.getCause() instanceof RuntimeException || e.getCause() instanceof Error;
+				System.out.println((rollback ? "ROLLBACK " : "COMMIT malgré l'exception ") + current.get());
+				throw e.getCause();
+			} finally {
+				current.remove();                                     // le thread est rendu propre
+			}
+		});
+	}
+
+	public static void main(String[] args) {
+		Service service = transactional(new RealService(), Service.class);
+		service.outer();                                              // un seul BEGIN : inner() est un appel interne
+		service.inner();                                              // via le proxy : sa propre transaction
+		System.out.println("hors proxy, transaction courante : " + current.get());
+	}
+}
+```
+
+Sortie :
+
+```
+BEGIN tx-1 pour outer
+  outer() dans tx-1
+  inner() dans tx-1
+COMMIT tx-1
+BEGIN tx-2 pour inner
+  inner() dans tx-2
+COMMIT tx-2
+hors proxy, transaction courante : null
+```
+
+Compare avec Spring : le proxy est ici un proxy JDK (sur une interface) plutôt que CGLIB, mais le principe est celui
+de 02 (section 4.4). `current` joue le rôle de `TransactionSynchronizationManager` (4.1), le test
+`current.get() != null` celui de `REQUIRED` (4.2), et le calcul de `rollback` la règle de 4.5. Ce qui manque : une
+vraie connexion, le flush (4.6), `readOnly` (4.4) et le drapeau rollback-only (4.3).
+
+**Défis :**
+
+1. Dans `main`, garde le proxy dans un champ statique `self`, et remplace dans `outer()` l'appel `inner()` par
+   `self.inner()`. Que s'affiche-t-il ?
+2. Remplace plutôt `inner()` par un appel `self.inner()` fait dans un **nouveau thread** (`new Thread(...)`, puis
+   `join()`). Que s'affiche-t-il, et quelle sous-section cela illustre-t-il ?
+
+<details><summary>Réponses</summary>
+
+1. `inner rejoint tx-1` apparaît entre `outer() dans tx-1` et `inner() dans tx-1` : l'appel passe maintenant par le
+   proxy, qui trouve une transaction dans le thread et la rejoint (`REQUIRED`). Un seul `BEGIN`. C'est la correction
+   classique de l'auto-invocation, en version simplifiée.
+2. `BEGIN tx-2 pour inner` à l'intérieur de `tx-1` : le nouveau thread a son propre `ThreadLocal`, vide, donc le proxy
+   ouvre une deuxième transaction indépendante, validée avant `tx-1` (`COMMIT tx-2` puis `COMMIT tx-1`). C'est
+   l'expérience du thread `worker` de 4.1.
+</details>
+
+---
+
+## 5. À toi de jouer
 
 ### Exercice 1 : voir les transactions s'ouvrir
 
@@ -379,7 +829,7 @@ données est bien en écriture.
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -387,14 +837,14 @@ données est bien en écriture.
 | Des modifications ne sont pas écrites, sans erreur | Exécution dans une transaction `readOnly` | Annoter la méthode d'écriture avec `@Transactional` |
 | Données à moitié écrites après une erreur | Exception vérifiée (commit par défaut), ou exception attrapée et avalée | Exceptions métier en `RuntimeException` ; ne pas avaler ; `rollbackFor` si besoin |
 | `UnexpectedRollbackException` au commit | Une méthode interne a levé une exception (transaction marquée à annuler), la méthode externe l'a attrapée et a continué | Laisser l'exception remonter, ou isoler l'opération dans `REQUIRES_NEW` si c'est vraiment voulu |
-| `LazyInitializationException: no Session` | Relation LAZY lue hors transaction (`open-in-view=false`) | Construire le DTO dans le service ; `@EntityGraph` si la relation est toujours nécessaire |
+| `LazyInitializationException: ... - no session` | Relation LAZY lue hors transaction (`open-in-view=false`) | Construire le DTO dans le service ; `@EntityGraph` si la relation est toujours nécessaire |
 | Doublons malgré la vérification `existsBy...` | Check-then-act entre deux requêtes simultanées | Contrainte unique en base + traduction de `DataIntegrityViolationException` |
 | Les tests se polluent entre eux | `@Transactional` sur un test `RANDOM_PORT` n'annule rien | Nettoyer la base dans un `@AfterEach` |
 | Connexions épuisées, requêtes qui attendent | Transactions trop longues (appel HTTP externe, traitement lourd dans la méthode) | Garder les transactions courtes ; sortir les appels externes de la méthode transactionnelle |
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **`@Version` (verrouillage optimiste)** : protège contre la perte de mise à jour (deux personnes modifient la même
   tâche ; la seconde reçoit une erreur au lieu d'écraser). Complément naturel des transactions pour les modifications
@@ -408,15 +858,18 @@ données est bien en écriture.
   réellement validée.
 - **Audit** (`@CreatedBy`, `@LastModifiedBy`) : voir [08. Persistance](08-persistance.md).
 
-Documentation officielle :
-- *Spring Framework Reference*, section "Data Access" > "Transaction Management" (notamment "Declarative
-  Transaction Management" et "Transaction Propagation")
-- *Spring Boot Reference*, section "Data" > "SQL Databases" (propriété `spring.jpa.open-in-view`)
+Documentation officielle : les liens de la section 4 (chaque sous-section se termine par ses sources), en
+particulier :
+- [Spring Framework : Using @Transactional](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html)
+  et [Transaction Propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html)
+- [Spring Data JPA : Transactionality](https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html)
+- [Spring Boot : SQL Databases](https://docs.spring.io/spring-boot/reference/data/sql.html) (propriété
+  `spring.jpa.open-in-view`)
 - *PostgreSQL Documentation*, chapitre "Concurrency Control" > "Transaction Isolation"
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Que fait Spring si une `TaskNotFoundException` sort de `updateTask` ? Et si c'était une `IOException` ?**
 

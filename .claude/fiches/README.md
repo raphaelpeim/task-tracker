@@ -14,10 +14,15 @@ Chaque fiche suit le même plan :
 1. **Le problème que ça résout** : l'intuition, ce qu'on ferait sans
 2. **Les concepts** : l'explication, progressive
 3. **Dans le projet** : le code réel du task-tracker, fichier et ligne
-4. **À toi de jouer** : des exercices à faire sur le projet
-5. **Pièges fréquents** : symptôme, cause, solution
-6. **Pour aller plus loin** : notions liées et documentation
-7. **Quiz** : pour vérifier ce que tu as retenu (réponses repliées)
+4. **Sous le capot** : les mécanismes réels derrière la "magie", pourquoi ils sont nécessaires, comment les
+   observer dans le projet (logs, classes générées, point d'arrêt) et les liens vers la documentation officielle
+5. **À toi de jouer** : des exercices à faire sur le projet
+6. **Pièges fréquents** : symptôme, cause, solution
+7. **Pour aller plus loin** : notions liées et documentation
+8. **Quiz** : pour vérifier ce que tu as retenu (réponses repliées)
+
+Exception : le guide [`14-jwt.md`](14-jwt.md) suit l'ordre des étapes de mise en place. Sa partie "Sous le capot"
+est la section 11, en fin de guide.
 
 ## Les fiches
 

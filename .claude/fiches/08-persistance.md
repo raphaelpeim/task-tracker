@@ -6,6 +6,8 @@
 - Pourquoi les relations entre entités se chargent "paresseusement", et le piège du N+1 qui en découle.
 - Pourquoi modifier une entité suffit à mettre la base à jour, sans appeler `save`.
 - Comment Flyway fait évoluer le schéma de la base de façon sûre et reproductible.
+- Ce qui se passe réellement dans le projet, logs et SQL à l'appui : l'ordre Flyway puis Hibernate, le pool de
+  connexions, le contexte de persistance, le proxy LAZY, les méthodes dérivées, et un mini-Hibernate à écrire.
 
 **Prérequis** : [02. Beans et injection](02-beans-injection.md), [04. Architecture en couches](04-architecture-couches.md).
 La fiche [09. Transactions](09-transactions.md) complète celle-ci : les deux se lisent ensemble.
@@ -227,14 +229,14 @@ Cette interface vide te donne déjà : `findAll`, `findById`, `save`, `saveAndFl
 
 | Méthode | Requête générée (simplifiée) |
 |---|---|
-| `existsByEmail(String email)` | `select count(*) > 0 from app_user where email = ?` |
+| `existsByEmail(String email)` | `select id from app_user where email = ? fetch first 1 rows only` (SQL réel en 4.7) |
 | `existsByUsernameIgnoreCase(String u)` | `... where upper(username) = upper(?)` |
 | `findByStatus(TaskStatus s)` | `select * from task where status = ?` |
 | `findByStatusOrderByCreatedDateDesc(...)` | `... where status = ? order by created_date desc` |
 | `countByAssigneeId(Long id)` | `select count(*) from task where assignee_id = ?` |
 
 Les mots-clés (`By`, `And`, `Or`, `IgnoreCase`, `OrderBy`, `Between`, `Like`, `IsNull`...) sont listés dans la doc
-Spring Data. Si le nom devient illisible, on passe à `@Query` (voir §6).
+Spring Data. Si le nom devient illisible, on passe à `@Query` (voir §7).
 
 **`Optional`** : `findById` renvoie un `Optional<Task>`, pour t'obliger à traiter le cas "introuvable"
 (`orElseThrow`).
@@ -470,8 +472,9 @@ Deux protections superposées :
 1. Lignes 71 à 73 : une vérification préalable, qui donne un message clair dans le cas normal.
 2. Lignes 81 à 87 : si deux inscriptions arrivent **en même temps**, les deux passent la vérification, et c'est
    l'index unique de la base qui refuse la seconde. `saveAndFlush` force l'`INSERT` **dans** le `try`, pour que
-   l'erreur soit attrapée ici et traduite en 409. Avec un simple `save`, l'`INSERT` partirait probablement aussi tout
-   de suite (à cause de `IDENTITY`), mais `saveAndFlush` rend l'intention explicite et ne dépend pas de ce détail.
+   l'erreur soit attrapée ici et traduite en 409. Avec un simple `save`, l'`INSERT` partirait aussi tout de suite
+   (à cause de `IDENTITY`, vérifié en 4.3), mais `saveAndFlush` rend l'intention explicite et ne dépend pas de ce
+   détail.
 
 Le nom de la contrainte (`app_user_username_upper`, ligne 25) est celui de l'index créé dans V1 : c'est ce lien qui
 permet de savoir quel champ est en doublon.
@@ -493,7 +496,413 @@ Les tests `shouldReturn409WhenConcurrentRegistrationHitsUsernameIndex` et `...Hi
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Les sections précédentes disent **ce que** font Flyway, Hibernate et Spring Data. Celle-ci montre **comment**, dans
+ce projet, et surtout comment le **voir**. Même plan que dans [02. Beans et injection](02-beans-injection.md) : le
+mécanisme réel, comment l'observer, ce qui se passerait sans, la source.
+
+Deux rappels de la fiche 02 qu'on ne refait pas ici : un repository est un proxy JDK qui délègue à
+`SimpleJpaRepository` (02, section 4.5), et `@Transactional` passe par un proxy CGLIB (02, section 4.4).
+
+Tous les extraits ci-dessous sont réels : ils viennent d'un test d'intégration temporaire lancé sur le projet
+(PostgreSQL 16 via Testcontainers, Hibernate 7.4.5, Spring Data JPA 4.1.1, Flyway 12.4.0, HikariCP 7.0.2). Les
+horodatages ont été retirés et les lignes trop longues raccourcies (`...`). Les lignes qui commencent par `@@@` sont
+des `System.out.println` du test, pour se repérer.
+
+Pour activer les logs :
+
+- en lançant l'application :
+  `./mvnw spring-boot:run -Dspring-boot.run.profiles=local "-Dspring-boot.run.arguments=--logging.level.org.hibernate.SQL=DEBUG --logging.level.org.hibernate.orm.jdbc.bind=TRACE"`
+- en lançant un test : `./mvnw test -Dtest=TaskControllerTest "-DargLine=-Dlogging.level.org.hibernate.SQL=DEBUG"`.
+  Tant que la configuration JWT est en chantier, ajoute aussi dans l'`argLine` les propriétés `app.jwt.secret`,
+  `app.jwt.issuer` et `app.jwt.expiration`, sinon le contexte ne démarre pas.
+
+### 4.1 Le démarrage : Flyway d'abord, Hibernate ensuite
+
+**Le mécanisme.** Avec `ddl-auto=validate`, Hibernate compare les entités aux tables **au moment où il crée
+l'`EntityManagerFactory`**, pendant le démarrage. Il faut donc que Flyway ait fini ses migrations avant. Spring Boot ne
+compte pas sur la chance : un post-processeur de Spring Boot (`DatabaseInitializationDependencyConfigurer`) repère
+d'un côté les beans qui **initialisent** la base (Flyway, les scripts SQL), de l'autre les beans qui **ont besoin**
+d'une base initialisée (l'`EntityManagerFactory`), et ajoute aux seconds un `depends-on` vers les premiers. C'est le
+même `depends-on` que tu pourrais écrire à la main avec `@DependsOn`.
+
+Qui est "initialiseur" et qui "dépend" est déclaré dans un simple fichier texte, `META-INF/spring.factories`, présent
+dans les jars `spring-boot-flyway` et `spring-boot-jpa` (même principe que les fichiers `.imports` de 02, section 4.6).
+
+**L'observer.**
+
+- Les logs INFO suffisent. Extrait réel du démarrage d'un test :
+  ```
+  o.f.c.i.s.JdbcTableSchemaHistory : Schema history table "public"."flyway_schema_history" does not exist yet
+  o.f.core.internal.command.DbValidate : Successfully validated 2 migrations (execution time 00:00.027s)
+  o.f.c.i.s.JdbcTableSchemaHistory : Creating Schema History table "public"."flyway_schema_history" ...
+  o.f.core.internal.command.DbMigrate : Current version of schema "public": << Empty Schema >>
+  o.f.core.internal.command.DbMigrate : Migrating schema "public" to version "1 - create app user table"
+  o.f.core.internal.command.DbMigrate : Migrating schema "public" to version "2 - create task table"
+  o.f.core.internal.command.DbMigrate : Successfully applied 2 migrations to schema "public", now at version v2 (execution time 00:00.044s)
+  org.hibernate.orm.jpa               : HHH008540: Processing PersistenceUnitInfo [name: default]
+  org.hibernate.orm.core              : HHH000001: Hibernate ORM core version 7.4.5.Final
+  com.zaxxer.hikari.HikariDataSource  : HikariPool-1 - Starting...
+  com.zaxxer.hikari.HikariDataSource  : HikariPool-1 - Start completed.
+  j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+  ```
+  Remarque le nom du script (`V1__create_app_user_table.sql`) transformé en `"1 - create app user table"` : version
+  avant les `__`, description après, `_` remplacés par des espaces.
+- Le `depends-on` lui-même : dans un test, `beanFactory.getBeanDefinition("entityManagerFactory").getDependsOn()`
+  renvoie `[flyway, flywayInitializer, dataSourceScriptDatabaseInitializer]`.
+- Les déclarations :
+  `unzip -p ~/.m2/repository/org/springframework/boot/spring-boot-jpa/4.1.1/spring-boot-jpa-4.1.1.jar META-INF/spring.factories`
+  affiche notamment `JpaDependsOnDatabaseInitializationDetector`.
+
+Détail qui intrigue en lisant ce log : en test, Flyway migre **avant** que le pool Hikari ne démarre. C'est que
+le `@ServiceConnection` de `TestcontainersConfiguration` fournit aussi à Flyway ses propres informations de
+connexion (l'URL du conteneur), et `FlywayAutoConfiguration` crée alors une
+petite `DataSource` dédiée (`SimpleDriverDataSource`, sans pool) pour les migrations. En local, sans propriété
+`spring.flyway.url`, le même code fait utiliser à Flyway la `DataSource` principale, donc le pool Hikari (lu dans le
+code de `FlywayAutoConfiguration`, pas observé ici).
+
+**Et sans ?** Vérifié en relançant un test avec `-Dspring.flyway.enabled=false` (la base Testcontainers est vide) :
+
+```
+Error creating bean with name 'entityManagerFactory' defined in class path resource [org/springframework/boot/hibernate/autoconfigure/HibernateJpaConfiguration.class]: Unable to build Hibernate SessionFactory  [persistence unit: default] ; nested exception is org.hibernate.tool.schema.spi.SchemaManagementException: Schema validation: missing table [app_user]
+```
+
+C'est exactement le rôle de `validate` : refuser de démarrer plutôt que d'échouer à la première requête. Les autres
+messages possibles, lus dans `hibernate-core` 7.4.5 : `Schema validation: missing column [...] in table [...]` et
+`Schema validation: wrong column type encountered in column [...] in table [...]`.
+
+Et sans la ligne `ddl-auto=validate` ? D'après la documentation de Spring Boot, la valeur par défaut serait `none`
+(Flyway est détecté et la base n'est pas une base embarquée) : Hibernate ne vérifierait rien, et un désaccord entre
+entité et migration ne se verrait qu'à l'exécution. Avec `update` ou `create`, Hibernate modifierait lui-même le
+schéma, dans le dos de Flyway.
+
+**La source.** [Database Initialization (Spring Boot how-to)](https://docs.spring.io/spring-boot/how-to/data-initialization.html#howto.data-initialization.migration-tool.flyway),
+[Initialize a Database Using Hibernate](https://docs.spring.io/spring-boot/how-to/data-initialization.html#howto.data-initialization.using-hibernate),
+[Flyway : Migrations](https://documentation.red-gate.com/flyway/flyway-concepts/migrations).
+
+### 4.2 Le pool HikariCP : des connexions prêtées, pas ouvertes
+
+**Le mécanisme.** Le starter JPA tire `HikariCP`, et l'auto-configuration de la `DataSource` le choisit parce qu'il
+est sur le classpath. Le bean `DataSource` du projet est donc un `com.zaxxer.hikari.HikariDataSource`. Au démarrage,
+il ouvre un lot de connexions PostgreSQL et les garde. Quand une transaction commence, elle en **emprunte** une ;
+`close()` ne ferme pas la connexion, il la **rend** au pool. Ce que ton code manipule n'est d'ailleurs pas la
+connexion PostgreSQL elle-même mais une enveloppe, `com.zaxxer.hikari.pool.HikariProxyConnection`, qui sait se rendre
+au pool.
+
+**L'observer.** Avec `logging.level.com.zaxxer.hikari=DEBUG`, Hikari affiche toute sa configuration au démarrage,
+puis chaque connexion ouverte. Extrait réel :
+
+```
+HikariConfig : autoCommit......................true
+HikariConfig : connectionTimeout...............30000
+HikariConfig : maximumPoolSize.................10
+HikariConfig : minimumIdle.....................10
+HikariConfig : poolName........................"HikariPool-1"
+HikariPool   : HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@362ae951
+HikariPool   : HikariPool-1 - After adding stats (total=10/10, idle=10/10, active=0, waiting=0)
+```
+
+Dix connexions ouvertes d'avance (`minimumIdle` vaut par défaut `maximumPoolSize`), toutes inactives. Des lignes
+`Pool stats (total=..., idle=..., active=..., waiting=...)` apparaissent aussi au démarrage puis lors des passages
+de maintenance du pool : `active` compte les connexions prêtées, `waiting` les threads qui attendent une connexion
+libre.
+
+Autre observation, dans une transaction : `connection.getAutoCommit()` renvoie `false`, alors que le pool est
+configuré à `true`. C'est le gestionnaire de transactions qui coupe l'auto-commit en début de transaction (voir
+[09. Transactions](09-transactions.md), section 4.1).
+
+**Pourquoi c'est nécessaire.** Ouvrir une connexion PostgreSQL, c'est une connexion réseau, une authentification, et
+un processus créé côté serveur. Sans pool, chaque transaction paierait ce coût, et sous charge tu pourrais dépasser le
+nombre maximal de connexions accepté par PostgreSQL. Le pool fait aussi office de limite : avec 10 connexions, une
+onzième transaction simultanée attend, jusqu'à `connectionTimeout` (30 s) avant d'échouer. D'où la règle "transactions
+courtes" de la fiche 09. Tout se règle par `spring.datasource.hikari.*`.
+
+**La source.** [Spring Boot : Supported Connection Pools](https://docs.spring.io/spring-boot/reference/data/sql.html#data.sql.datasource.connection-pool),
+[HikariCP](https://github.com/brettwooldridge/HikariCP) (le README liste chaque réglage et sa valeur par défaut).
+
+### 4.3 Voir le SQL réellement envoyé
+
+**Le mécanisme.** Hibernate écrit chaque requête dans le logger `org.hibernate.SQL` (niveau DEBUG), et chaque valeur
+liée à un `?` dans `org.hibernate.orm.jdbc.bind` (niveau TRACE). `spring.jpa.show-sql=true` (exercice 1) est une
+version simplifiée : la requête est imprimée directement sur la sortie standard, sans passer par le système de logs,
+et sans les valeurs.
+
+**L'observer.** Un `taskRepository.save(...)` d'une nouvelle tâche, dans une transaction :
+
+```
+@@@ avant save
+org.hibernate.SQL : insert into task (assignee_id,created_date,description,priority,status,title,type,updated_date) values (?,?,?,?,?,?,?,?)
+org.hibernate.orm.jdbc.bind : binding parameter (1:BIGINT) <- [null]
+org.hibernate.orm.jdbc.bind : binding parameter (2:TIMESTAMP) <- [2026-10-29T14:46:12.763421]
+org.hibernate.orm.jdbc.bind : binding parameter (3:VARCHAR) <- [D]
+...
+org.hibernate.orm.jdbc.bind : binding parameter (8:TIMESTAMP) <- [null]
+@@@ après save, id=2
+```
+
+À lire :
+
+- pas de colonne `id` dans l'`INSERT` : avec `IDENTITY`, c'est PostgreSQL qui la remplit ;
+- l'`INSERT` part **pendant** `save`, avant la fin de la transaction : Hibernate a besoin de l'id tout de suite, et
+  `getId()` vaut déjà 2 juste après (c'est ce que 2.2 annonçait) ;
+- `created_date` a une valeur : c'est `@CreationTimestamp` qui l'a posée juste avant l'`INSERT` ;
+- les alias du type `t1_0`, `au1_0` que tu verras dans les `select` sont générés par Hibernate (initiales de
+  l'entité, ou de l'attribut pour une jointure comme `a1_0` pour `assignee`, puis des numéros).
+
+Attention : le niveau TRACE de `bind` affiche **toutes** les valeurs, y compris les hash de mots de passe à
+l'inscription. À réserver au poste de développement.
+
+**La source.** [Hibernate User Guide : Flushing](https://docs.hibernate.org/orm/7.4/userguide/html_single/#flushing)
+pour le moment où le SQL part, [Spring Boot : SQL Databases](https://docs.spring.io/spring-boot/reference/data/sql.html).
+
+### 4.4 Le contexte de persistance : une table d'objets par transaction
+
+**Le mécanisme.** À chaque transaction, Spring ouvre une nouvelle session Hibernate (classe `SessionImpl`, qui
+implémente `EntityManager`). Dans la session, une table de correspondance "type + id → objet Java" : c'est le
+contexte de persistance, ou cache de premier niveau. `findById` regarde d'abord dans cette table ; il n'interroge la
+base que si l'entité n'y est pas encore.
+
+Subtilité : l'`EntityManager` que Spring injecte (et que `SimpleJpaRepository` utilise) n'est **pas** une session.
+C'est un proxy partagé (`jdk.proxy2.$Proxy174` dans le test), un objet unique utilisé par tous les threads, qui à
+chaque appel va chercher la session **de la transaction en cours**. Où il la trouve : [09. Transactions](09-transactions.md),
+section 4.1.
+
+**L'observer.** Deux `findById(1L)` dans la **même** transaction :
+
+```
+org.hibernate.SQL : select t1_0.id,t1_0.assignee_id,...,t1_0.updated_date from task t1_0 where t1_0.id=?
+@@@ first findById done
+@@@ second findById done, same instance: true
+@@@ contains: true
+```
+
+Un seul `select`, et le même objet (`==`). Les deux mêmes appels **hors** transaction, donc chacun dans la sienne
+(celle de `SimpleJpaRepository`) : deux `select`, et `same instance: false`.
+
+**Pourquoi c'est nécessaire.** Sans cette table, deux lectures de la même ligne dans une transaction donneraient deux
+objets distincts : si ton code modifie l'un puis l'autre, lequel écrire ? Le contexte garantit **un objet par ligne
+et par transaction**. C'est aussi lui qui explique le N+1 "par assigné distinct" de 2.5 (un assigné déjà dans la table
+n'est pas rechargé), et c'est la base du dirty checking (4.5). Sa limite : il grossit avec tout ce que la transaction
+charge, et disparaît avec elle.
+
+**La source.** [Hibernate User Guide : Persistence Context](https://docs.hibernate.org/orm/7.4/userguide/html_single/#pc),
+[Obtain an entity](https://docs.hibernate.org/orm/7.4/userguide/html_single/#pc-find).
+
+### 4.5 Le dirty checking, et le `save` inutile
+
+**Le mécanisme.** En chargeant une entité, Hibernate garde une **photo** de ses valeurs. Au flush (au commit, ou à un
+`flush()` explicite), il compare chaque entité managée à sa photo, champ par champ, et écrit un `UPDATE` pour celles
+qui ont changé. Côté Spring Data, `save(entity)` fait : "si l'entité est nouvelle (id `null`), `persist` ; sinon,
+`merge`". Et un `merge` sur une entité **déjà managée** ne fait rien d'autre que la renvoyer.
+
+**L'observer.** Six cas réels, chacun dans sa transaction, sur la tâche 1 (logs SQL activés) :
+
+| Code | SQL envoyé |
+|---|---|
+| `findById`, `setTitle(...)`, pas de `save` | `select`, puis `update` au commit |
+| `findById`, `setTitle(...)`, puis `save(task)` | **exactement le même** : `select`, puis `update` au commit. `save` renvoie le même objet (`same instance: true`), aucune requête en plus |
+| `findById`, aucune modification | `select` seulement |
+| `findById`, `setTitle("X")` puis `setTitle` de la valeur d'origine | `select` seulement : Hibernate compare des valeurs, pas des appels de setter |
+| entité chargée dans une transaction **précédente**, modifiée, pas de `save` | rien du tout : elle est détachée, la modification est perdue |
+| la même entité détachée, puis `save` | `select` (le `merge` recharge la ligne) puis `update` |
+
+L'`UPDATE` réel :
+
+```
+org.hibernate.SQL : update task set assignee_id=?,description=?,priority=?,status=?,title=?,type=?,updated_date=? where id=?
+org.hibernate.orm.jdbc.bind : binding parameter (5:VARCHAR) <- [Renamed]
+org.hibernate.orm.jdbc.bind : binding parameter (7:TIMESTAMP) <- [2026-10-29T14:46:12.793537]
+org.hibernate.orm.jdbc.bind : binding parameter (8:BIGINT) <- [1]
+```
+
+Toutes les colonnes sauf `created_date` (`updatable = false`), et `updated_date` remplie par le `@PreUpdate` juste
+avant. Conclusion pour `TaskService.updateTask` : un `save` n'y changerait rien. À l'inverse, le seul vrai danger est
+le cas détaché : une modification faite hors transaction disparaît **sans erreur**.
+
+**Il existe une autre technique : l'enhancement.** Hibernate peut réécrire le bytecode des entités à la compilation
+(plugin `hibernate-enhance-maven-plugin`) pour que chaque setter note lui-même "je suis modifié", ce qui évite la
+comparaison. Le projet **ne l'utilise pas**, et tu peux le vérifier : pas de plugin Hibernate dans le `pom.xml`,
+`Task.class.getInterfaces()` renvoie un tableau vide (une entité enrichie implémenterait des interfaces Hibernate
+comme `ManagedEntity`), et le log `No LoadTimeWeaver setup: ignoring JPA class transformer` au démarrage indique
+qu'aucune transformation n'a lieu non plus à l'exécution. Conséquence : le coût du flush grandit avec le nombre
+d'entités chargées. C'est une des raisons d'être de `readOnly = true` ([09. Transactions](09-transactions.md),
+section 4.4), qui supprime ce flush.
+
+**La source.** [Spring Data JPA : Saving Entities](https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html),
+[Hibernate User Guide : Modifying managed/persistent state](https://docs.hibernate.org/orm/7.4/userguide/html_single/#pc-managed-state),
+[Merging detached data](https://docs.hibernate.org/orm/7.4/userguide/html_single/#pc-merge),
+[Bytecode Enhancement](https://docs.hibernate.org/orm/7.4/userguide/html_single/#BytecodeEnhancement).
+
+### 4.6 Le proxy LAZY : une sous-classe générée en mémoire
+
+**Le mécanisme.** Pour `@ManyToOne(fetch = FetchType.LAZY)`, Hibernate lit `assignee_id` dans la ligne de `task`,
+mais ne charge pas l'utilisateur. Il place dans le champ `assignee` une instance d'une **sous-classe** d'`AppUser`,
+générée en mémoire par la bibliothèque Byte Buddy (dépendance de `hibernate-core`), qui ne connaît que l'id. Au
+premier appel d'une méthode autre que `getId()`, elle lance le `select` puis délègue à un vrai `AppUser`.
+
+**L'observer.** Dans une transaction, après `taskRepository.findById(1L)` :
+
+```
+@@@ assignee class: com.personal.task_tracker.user.entity.AppUser$HibernateProxy
+@@@ superclass: com.personal.task_tracker.user.entity.AppUser
+@@@ interfaces: [interface org.hibernate.proxy.HibernateProxy, interface org.hibernate.proxy.ProxyConfiguration]
+@@@ initialized: false
+@@@ getId: 1
+@@@ initialized after getId: false
+org.hibernate.SQL : select au1_0.id,au1_0.created_date,au1_0.email,...,au1_0.username from app_user au1_0 where au1_0.id=?
+@@@ username: jdoe
+@@@ initialized after getUsername: true
+@@@ getClass after init: com.personal.task_tracker.user.entity.AppUser$HibernateProxy
+```
+
+- `initialized` vient de `Hibernate.isInitialized(...)`. `getId()` ne déclenche rien (l'id est déjà connu),
+  `getUsername()` déclenche le `select`.
+- Après chargement, l'objet reste un proxy : `getClass()` ne renvoie jamais `AppUser.class`.
+  `Hibernate.unproxy(assignee).getClass()` renvoie, lui, `AppUser`. Teste donc le type avec `instanceof`, jamais
+  avec `getClass() ==`.
+- Cherche `AppUser$HibernateProxy` dans `server/target/classes` : il n'y est pas, la classe n'existe qu'en mémoire.
+- Le même accès **après** la fin de la transaction donne, mot pour mot :
+  `org.hibernate.LazyInitializationException: Could not initialize proxy [com.personal.task_tracker.user.entity.AppUser#1] - no session`.
+
+**Pourquoi les règles de JPA.** Un proxy est une sous-classe, comme les proxies de Spring (02, section 4.4). D'où les
+contraintes de JPA sur les entités : classe non `final`, méthodes non `final`, et un constructeur sans argument au
+moins `protected` (celui de `Task.java`, ligne 55, et d'`AppUser`) pour que la sous-classe puisse être instanciée.
+
+**La source.** [Hibernate User Guide : Fetching](https://docs.hibernate.org/orm/7.4/userguide/html_single/#fetching),
+[Obtain an entity reference without initializing its data](https://docs.hibernate.org/orm/7.4/userguide/html_single/#pc-get-reference).
+
+### 4.7 Les méthodes dérivées : un nom analysé au démarrage
+
+**Le mécanisme.** Au démarrage (`Bootstrapping Spring Data JPA repositories in DEFAULT mode`, puis
+`Found 2 JPA repository interfaces` dans les logs), Spring Data crée le proxy de chaque repository. Pour chaque
+méthode que `SimpleJpaRepository` ne fournit pas et qui n'a pas de `@Query`, la stratégie par défaut
+(`CREATE_IF_NOT_FOUND`) **analyse le nom** : le préfixe (`existsBy`), puis les propriétés (`Email`, comparé aux champs
+d'`AppUser`), puis les mots-clés (`IgnoreCase`). Elle en construit une requête JPA, qu'Hibernate traduit en SQL.
+
+**L'observer.** Le SQL réel des méthodes de `UserRepository` :
+
+```
+@@@ existsByEmail("jdoe@mail.com")
+org.hibernate.SQL : select au1_0.id from app_user au1_0 where au1_0.email=? fetch first ? rows only
+org.hibernate.orm.jdbc.bind : binding parameter (1:VARCHAR) <- [jdoe@mail.com]
+org.hibernate.orm.jdbc.bind : binding parameter (2:INTEGER) <- [1]
+@@@ existsByUsernameIgnoreCase("JDOE")
+org.hibernate.SQL : select au1_0.id from app_user au1_0 where upper(au1_0.username)=upper(?) fetch first ? rows only
+@@@ existsById(1), méthode de SimpleJpaRepository, pas dérivée
+org.hibernate.SQL : select count(*) from app_user au1_0 where au1_0.id=?
+```
+
+- Un `exists` dérivé n'est pas un `count(*)` : il demande une seule ligne (`fetch first 1 rows only`), la base peut
+  s'arrêter à la première trouvée.
+- `IgnoreCase` produit `upper(username) = upper(?)`, la même expression que l'index `app_user_username_upper` de V1.
+
+**La preuve que c'est fait au démarrage.** Vérifié avec un repository de test contenant une faute de frappe,
+`boolean existsByEmial(String email)` : l'application **ne démarre pas**.
+
+```
+Error creating bean with name 'tmpProbeBadRepository' ...: No property 'emial' found for type 'AppUser'; Did you mean 'email'
+```
+
+Spring Data se comporte comme un compilateur de noms de méthodes : l'erreur arrive au démarrage, pas au premier appel.
+Autre conséquence, visible dans [09. Transactions](09-transactions.md), section 4.2 : ces méthodes déclarées dans ton
+interface ne sont pas transactionnelles par défaut, contrairement à celles héritées de `SimpleJpaRepository`.
+
+**La source.** [Spring Data : Defining Query Methods](https://docs.spring.io/spring-data/jpa/reference/repositories/query-methods-details.html),
+[Spring Data JPA : Query Methods](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html).
+
+### 4.8 Le refaire toi-même : un contexte de persistance en 50 lignes
+
+Comme le mini-conteneur de la fiche 02, écris ce fichier **hors du projet** et lance-le avec
+`java MiniHibernate.java` :
+
+```java
+import java.util.HashMap;
+import java.util.Map;
+
+public class MiniHibernate {
+
+	// Une "entité" ordinaire
+	static class Task {
+		Long id;
+		String title;
+
+		Task(Long id, String title) {
+			this.id = id;
+			this.title = title;
+		}
+	}
+
+	// La "base de données" : une ligne par id
+	static final Map<Long, String> table = new HashMap<>(Map.of(1L, "Écrire la fiche"));
+
+	// Le "contexte de persistance" : les entités chargées, et une copie de leur état d'origine
+	static final Map<Long, Task> managed = new HashMap<>();
+	static final Map<Long, String> snapshots = new HashMap<>();
+
+	static Task find(Long id) {
+		Task existing = managed.get(id);
+		if (existing != null) {
+			return existing;                                         // cache de premier niveau : pas de SQL
+		}
+		System.out.println("select title from task where id=" + id);
+		Task task = new Task(id, table.get(id));
+		managed.put(id, task);
+		snapshots.put(id, task.title);                               // la photo "avant"
+		return task;
+	}
+
+	static void flush() {
+		for (Task task : managed.values()) {
+			if (!task.title.equals(snapshots.get(task.id))) {        // dirty checking : comparaison avec la photo
+				System.out.println("update task set title='" + task.title + "' where id=" + task.id);
+				table.put(task.id, task.title);
+				snapshots.put(task.id, task.title);
+			}
+		}
+	}
+
+	public static void main(String[] args) {
+		Task a = find(1L);
+		Task b = find(1L);
+		System.out.println("même objet : " + (a == b));
+		a.title = "Relire la fiche";                                  // aucune méthode save
+		flush();                                                     // ce que fait le commit
+		flush();                                                     // rien n'a changé depuis : aucun SQL
+	}
+}
+```
+
+Sortie :
+
+```
+select title from task where id=1
+même objet : true
+update task set title='Relire la fiche' where id=1
+```
+
+Compare avec 4.4 et 4.5 : un seul `select` pour deux `find`, le même objet, un `UPDATE` sans `save`, et rien au
+second flush. Ce qui manque par rapport à Hibernate : la génération du SQL à partir des annotations, les proxies
+(4.6), les transactions et la vraie base.
+
+**Défis :**
+
+1. Ajoute une méthode `clear()` qui vide `managed` et `snapshots`, et appelle-la entre les deux `find`. Qu'affiche le
+   programme, et à quelle situation réelle cela correspond-il ?
+2. Écris un `persist(Task)` pour une tâche nouvelle, qui l'ajoute à `managed` et à `snapshots` et affiche un
+   `insert`. Pourquoi faut-il **aussi** prendre la photo à ce moment-là ?
+
+<details><summary>Réponses</summary>
+
+1. Deux `select` et `même objet : false`. C'est ce qui se passe entre deux transactions : chacune a son propre
+   contexte (4.4, les deux `findById` hors transaction).
+2. Sans photo, le `flush()` suivant comparerait le titre à `null` et enverrait un `UPDATE` inutile juste après
+   l'`INSERT`. Hibernate prend lui aussi l'état de référence au moment du `persist`.
+</details>
+
+---
+
+## 5. À toi de jouer
 
 ### Exercice 1 : voir le SQL et le N+1
 
@@ -512,8 +921,9 @@ Les tests `shouldReturn409WhenConcurrentRegistrationHitsUsernameIndex` et `...Hi
 Avec `show-sql` actif, envoie un `PATCH /api/tasks/{id}` qui ne change que le statut.
 
 **À observer** : un `select` (le `findById`), puis un `update task set ...` alors que le code n'appelle jamais
-`save`. Remarque que l'`UPDATE` contient **toutes** les colonnes, pas seulement `status` : c'est le comportement par
-défaut d'Hibernate (`@DynamicUpdate` permet de changer ça, rarement utile).
+`save`. Remarque que l'`UPDATE` contient **toutes** les colonnes modifiables, pas seulement `status` (seules `id` et
+`created_date`, en `updatable = false`, en sont absentes) : c'est le comportement par défaut d'Hibernate
+(`@DynamicUpdate` permet de changer ça, rarement utile). Le SQL réel est en 4.5.
 
 ### Exercice 3 : lire l'historique Flyway
 
@@ -543,13 +953,13 @@ autre solution (une colonne numérique, ou une expression `CASE` dans une `@Quer
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
 | La page liste devient lente quand les données grossissent | Problème N+1 sur une relation LAZY | `@EntityGraph` ou `join fetch` dans une `@Query` ; un test qui compte les requêtes |
-| `LazyInitializationException: could not initialize proxy` | Accès à une relation LAZY après la fin de la transaction | Faire le mapping vers le DTO dans le service ; voir [09. Transactions](09-transactions.md) |
-| L'application refuse de démarrer : `Schema-validation: missing column` | Entité et migration en désaccord (`ddl-auto=validate`) | Écrire la migration correspondante, ou corriger le nom dans `@Column` |
+| `LazyInitializationException: Could not initialize proxy [...] - no session` | Accès à une relation LAZY après la fin de la transaction | Faire le mapping vers le DTO dans le service ; voir [09. Transactions](09-transactions.md) |
+| L'application refuse de démarrer : `Schema validation: missing column [...] in table [...]` | Entité et migration en désaccord (`ddl-auto=validate`) | Écrire la migration correspondante, ou corriger le nom dans `@Column` |
 | `Migration checksum mismatch` au démarrage | Une migration déjà appliquée a été modifiée | Annuler la modification et créer une nouvelle migration `V3__...` |
 | Les données d'un enum changent de sens après ajout d'une valeur | `EnumType.ORDINAL` (le défaut si on ne met rien) | Toujours `@Enumerated(EnumType.STRING)` |
 | Une modification n'est pas enregistrée | L'entité est détachée (chargée hors transaction ou dans une autre) | Charger et modifier dans la même méthode `@Transactional` |
@@ -560,7 +970,7 @@ autre solution (une colonne numérique, ou une expression `CASE` dans une `@Quer
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **`@Query`** : écrire soi-même la requête en JPQL (langage de requête sur les entités) ou en SQL natif, quand une
   méthode dérivée devient illisible. Exemple : `@Query("select t from Task t join fetch t.assignee where t.status = :status")`.
@@ -576,16 +986,18 @@ autre solution (une colonne numérique, ou une expression `CASE` dans une `@Quer
   `cascade`, `orphanRemoval`).
 - **Index** : une colonne souvent filtrée (`status`, `assignee_id`) gagne à être indexée, dans une migration.
 
-Documentation officielle :
-- *Spring Data JPA Reference Documentation* (méthodes dérivées : chapitre "Query Methods")
-- *Hibernate ORM User Guide*
+Documentation officielle : les liens de la section 4 (chaque sous-section se termine par ses sources), en
+particulier :
+- [Spring Data JPA : Query Methods](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html)
+- [Hibernate ORM 7.4 User Guide](https://docs.hibernate.org/orm/7.4/userguide/html_single/) et, plus abordable,
+  [An Introduction to Hibernate 7.4](https://docs.hibernate.org/orm/7.4/introduction/html_single/)
+- [Flyway : Migrations](https://documentation.red-gate.com/flyway/flyway-concepts/migrations)
+- [Spring Boot : SQL Databases](https://docs.spring.io/spring-boot/reference/data/sql.html)
 - *Jakarta Persistence Specification*
-- *Flyway Documentation* (concepts : "Migrations", "Validate")
-- *Spring Boot Reference*, section "Data" > "SQL Databases"
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Quelle est la différence entre JPA et Hibernate ?**
 

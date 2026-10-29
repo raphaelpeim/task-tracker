@@ -6,6 +6,7 @@
 - Comment fonctionne l'injection par constructeur, et pourquoi c'est la bonne pratique
 - Ce que fait réellement `@SpringBootApplication` et l'auto-configuration
 - Ce qu'est un proxy, et le piège qui en découle
+- Comment observer tout cela dans le projet : logs, classes générées, point d'arrêt, et un mini-conteneur à écrire
 
 **Prérequis** : [01. Maven et le pom.xml](01-maven-pom.md) (pour la notion de starter).
 
@@ -129,8 +130,8 @@ au point d'injection).
 - `@ComponentScan` : active le scan du paragraphe 2.3 ;
 - `@EnableAutoConfiguration` : active **l'auto-configuration**.
 
-L'auto-configuration est le cœur de Spring Boot. Au démarrage, Boot évalue des centaines de classes de
-configuration conditionnelles, du type :
+L'auto-configuration est le cœur de Spring Boot. Au démarrage, Boot évalue plusieurs dizaines de classes
+de configuration conditionnelles (70 dans ce projet, voir 4.6), du type :
 
 > "si la classe `DataSource` est sur le classpath **et** qu'une URL de base est configurée **et** que tu n'as pas
 > déjà déclaré de `DataSource`, alors je crée un pool de connexions."
@@ -168,10 +169,11 @@ n'est possible : Spring refuse de démarrer. C'est presque toujours le signe d'u
 
 ### Le point de départ
 
-`server/src/main/java/com/personal/task_tracker/TaskTrackerApplication.java:6-11`
+`server/src/main/java/com/personal/task_tracker/TaskTrackerApplication.java:7-14`
 
 ```java
 @SpringBootApplication                       // scan de com.personal.task_tracker et de ses sous-packages
+@ConfigurationPropertiesScan                 // enregistre les records @ConfigurationProperties (voir 03. Configuration)
 public class TaskTrackerApplication {
 	public static void main(String[] args) {
 		SpringApplication.run(TaskTrackerApplication.class, args);   // démarre le contexte et Tomcat
@@ -270,7 +272,274 @@ bénéfices de l'injection.
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Les sections précédentes disent **ce que** fait Spring. Celle-ci montre **comment** il le fait, et surtout comment
+le **voir** dans le projet. Rien de ce qui suit n'est caché : tout s'observe avec un log, un point d'arrêt ou un
+fichier dans un `.jar`. Chaque sous-section suit le même plan : le mécanisme réel, comment l'observer, la source.
+
+Pour activer un log sans toucher aux fichiers de configuration, passe-le en argument, comme dans l'exercice 4 :
+`./mvnw spring-boot:run -Dspring-boot.run.profiles=local -Dspring-boot.run.arguments=--logging.level.<package>=DEBUG`
+
+### 4.1 Le démarrage : d'abord les recettes, ensuite les objets
+
+**Le mécanisme.** `SpringApplication.run(...)` crée un `ApplicationContext` puis appelle sa méthode `refresh()`,
+qui travaille en deux temps :
+
+1. **Les recettes.** Le scan et l'auto-configuration produisent des `BeanDefinition` : pour chaque bean, son nom,
+   sa classe, son scope. Aucun objet n'est encore créé. Le scanner lit directement le bytecode des fichiers
+   `.class` pour y repérer les annotations, sans même charger les classes.
+2. **La fabrication.** Pour chaque singleton, Spring appelle `getBean(nom)`. Si le bean existe déjà, il est
+   renvoyé. Sinon Spring regarde les paramètres du constructeur, appelle `getBean` pour chacun (c'est récursif),
+   instancie l'objet, le fait passer par les `BeanPostProcessor` (voir 4.4), puis le range dans le registre des
+   singletons.
+
+Le nom d'un bean est le nom de sa classe avec une minuscule (`TaskService` → `taskService`), ou le nom de la
+méthode pour un `@Bean` (`SecurityConfig.encoder()` → `encoder`).
+
+**L'observer.** Active `logging.level.org.springframework.beans.factory.support.DefaultListableBeanFactory=DEBUG`.
+Extrait réel du projet, filtré sur quelques beans :
+
+```
+Creating shared instance of singleton bean 'userService'
+Creating shared instance of singleton bean 'userRepository'
+Creating shared instance of singleton bean 'encoder'
+Autowiring by type from bean name 'userService' via constructor to bean named 'userRepository'
+Autowiring by type from bean name 'userService' via constructor to bean named 'encoder'
+Creating shared instance of singleton bean 'taskController'
+Creating shared instance of singleton bean 'taskService'
+Creating shared instance of singleton bean 'taskRepository'
+Autowiring by type from bean name 'taskService' via constructor to bean named 'userService'
+Autowiring by type from bean name 'taskService' via constructor to bean named 'taskRepository'
+Autowiring by type from bean name 'taskController' via constructor to bean named 'taskService'
+```
+
+Lis-le comme une pile d'appels :
+
+- `userService` est créé en premier, parce que le package `auth` est scanné avant `task`, et qu'`AuthService` en a
+  besoin ;
+- Spring commence `taskController`, découvre qu'il lui faut `taskService`, le crée **à ce moment-là**, qui
+  lui-même réclame `taskRepository`. Le contrôleur n'est terminé qu'en dernier ;
+- `userService` n'est pas recréé pour `taskService` : il est déjà dans le registre, c'est le même objet.
+
+**La source.** [The IoC Container](https://docs.spring.io/spring-framework/reference/core/beans.html),
+[Classpath Scanning](https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html).
+
+### 4.2 L'injection : comment Spring choisit le bon bean
+
+**Le mécanisme.** Pour chaque paramètre de constructeur, Spring :
+
+1. liste tous les beans compatibles avec le **type** demandé ;
+2. s'il y en a un seul, l'injecte ;
+3. s'il y en a plusieurs, essaie de départager, dans l'ordre : `@Qualifier` au point d'injection, puis `@Primary`,
+   puis **le nom du paramètre comparé au nom des beans** ;
+4. s'il n'en reste pas exactement un, refuse de démarrer.
+
+L'étape "nom du paramètre" n'est possible que parce que le `spring-boot-starter-parent` compile avec l'option
+`-parameters`, qui conserve le nom des paramètres dans le bytecode.
+
+**L'observer.** Dans le log de 4.1, la ligne `via constructor to bean named 'encoder'` montre le résultat de la
+résolution. Vérifié sur le projet : si tu ajoutes dans `SecurityConfig` un second `PasswordEncoder` dont la
+méthode s'appelle `passwordEncoder`, l'application **démarre sans erreur**, et le log devient
+`... to bean named 'passwordEncoder'`. Le paramètre de `UserService` porte ce nom, Spring a départagé seul.
+Avec un autre nom de méthode, tu obtiens bien l'erreur de l'exercice 2. Retiens le piège : renommer un paramètre
+peut changer silencieusement le bean injecté. Quand il y a plusieurs candidats, sois explicite avec `@Qualifier`.
+
+**La source.** [Dependencies and Configuration](https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html).
+
+### 4.3 Les classes `@Configuration` sont des sous-classes générées
+
+**Le mécanisme.** Spring ne garde pas ta classe `SecurityConfig` telle quelle : il en génère une sous-classe au
+démarrage, avec la bibliothèque CGLIB intégrée à Spring. Cette sous-classe redéfinit chaque méthode `@Bean` :
+si une méthode `@Bean` en appelle une autre, l'appel est intercepté et renvoie le singleton existant au lieu d'en
+fabriquer un second. C'est ce qui rend les méthodes `@Bean` "spéciales" (tableau de 2.2).
+
+**L'observer.** Vérifié dans un test du projet, `getClass().getName()` sur le bean renvoie :
+
+```
+com.personal.task_tracker.commons.config.SecurityConfig$$SpringCGLIB$$0
+```
+
+Le `$$SpringCGLIB$$0` signale une classe qui n'existe dans aucun fichier source : elle a été écrite en mémoire au
+démarrage. `@Configuration(proxyBeanMethods = false)` désactive ce mécanisme quand les méthodes `@Bean` ne
+s'appellent pas entre elles.
+
+**La source.** [Using the @Configuration annotation](https://docs.spring.io/spring-framework/reference/core/beans/java/configuration-annotation.html).
+
+### 4.4 Le proxy de `@Transactional`, concrètement
+
+**Le mécanisme.** Après avoir créé chaque bean, Spring le passe à une série de `BeanPostProcessor` : des objets
+qui ont le droit d'inspecter un bean, et même de le **remplacer**. L'un d'eux repère les classes portant
+`@Transactional`. Pour `TaskService`, il génère une sous-classe CGLIB dont chaque méthode publique fait :
+
+```java
+// pseudo-code de TaskService$$SpringCGLIB$$0.getAllTasks()
+ouvrir la transaction;
+try {
+	resultat = vraiTaskService.getAllTasks();   // l'objet que tu as écrit
+	valider la transaction;
+	return resultat;
+} catch (RuntimeException e) {
+	annuler la transaction;
+	throw e;
+}
+```
+
+C'est **ce proxy** qui est rangé dans le registre et injecté dans `TaskController`. Les limites de 2.7 en
+découlent mécaniquement :
+
+- un proxy est une **sous-classe** : une méthode `private` ou `final` ne peut pas être redéfinie, donc pas
+  interceptée ;
+- dans le vrai `TaskService`, `this` désigne l'objet réel, pas le proxy : un appel `this.autreMethode()` ne
+  repasse pas par la sous-classe.
+
+**L'observer.** Trois façons, de la plus simple à la plus complète :
+
+1. `getClass().getName()` sur le bean injecté donne `com.personal.task_tracker.task.service.TaskService$$SpringCGLIB$$0`.
+2. Les logs, avec `logging.level.org.springframework.transaction.interceptor=TRACE` et
+   `logging.level.org.springframework.orm.jpa.JpaTransactionManager=DEBUG`. Extrait réel pour `getAllTasks()` :
+   ```
+   Creating new transaction with name [com.personal.task_tracker.task.service.TaskService.getAllTasks]: PROPAGATION_REQUIRED,ISOLATION_DEFAULT,readOnly
+   Getting transaction for [com.personal.task_tracker.task.service.TaskService.getAllTasks]
+   Getting transaction for [org.springframework.data.jpa.repository.support.SimpleJpaRepository.findAll]
+   Completing transaction for [org.springframework.data.jpa.repository.support.SimpleJpaRepository.findAll]
+   ```
+   Le `readOnly` vient du `@Transactional(readOnly = true)` posé sur la classe. Le repository a lui aussi ses
+   propres `@Transactional` : il rejoint la transaction ouverte par le service au lieu d'en créer une.
+3. Un point d'arrêt dans `TaskService.getAllTasks()`, puis un `GET /api/tasks`. Dans la pile d'appels, entre
+   `TaskController.getAllTasks` et ta méthode, tu verras s'intercaler `TaskService$$SpringCGLIB$$0`,
+   `CglibAopProxy`, `TransactionInterceptor` et `TransactionAspectSupport.invokeWithinTransaction`. C'est le
+   pseudo-code ci-dessus, en vrai.
+
+**La source.** [Proxying Mechanisms](https://docs.spring.io/spring-framework/reference/core/aop/proxying.html),
+[Understanding the Spring Framework's Declarative Transaction Implementation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-decl-explained.html),
+[Customizing Beans by Using a BeanPostProcessor](https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html).
+
+### 4.5 Les repositories que tu n'as pas implémentés
+
+**Le mécanisme.** Pour chaque interface qui étend `JpaRepository`, Spring Data enregistre un bean dont l'objet est
+un **proxy dynamique JDK** : une classe générée qui implémente `UserRepository`. Quand tu appelles `findAll()` ou
+`save()`, le proxy délègue à `SimpleJpaRepository`, une vraie classe de Spring Data (tu l'as vue passer dans le
+log de 4.4). Pour `existsByEmail`, Spring Data a analysé le **nom** de la méthode au démarrage et en a tiré la
+requête correspondante.
+
+**L'observer.** En lançant l'application, `getClass().getName()` sur `userRepository` donne un nom de la forme
+`jdk.proxy2.$Proxy` suivi d'un numéro. Dans les tests, le nom est différent
+(`UserRepository$MockitoMock$...$$SpringCGLIB$$0`) : le `@MockitoSpyBean` d'`IntegrationTest` enveloppe le
+repository dans un espion, lui-même proxifié. Détails dans [08. Persistance](08-persistance.md).
+
+### 4.6 L'auto-configuration, fichier par fichier
+
+**Le mécanisme.** Un starter n'apporte pas de magie, il apporte des `.jar`. Depuis Spring Boot 4, chaque domaine a
+son module : le starter JPA tire par exemple `spring-boot-jdbc`. Chacun de ces modules contient un simple fichier
+texte, `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`, qui liste ses classes
+d'auto-configuration. Celui de `spring-boot-jdbc` commence ainsi :
+
+```
+org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+org.springframework.boot.jdbc.autoconfigure.DataSourceInitializationAutoConfiguration
+org.springframework.boot.jdbc.autoconfigure.DataSourceTransactionManagerAutoConfiguration
+...
+```
+
+Au démarrage, Boot lit tous ces fichiers présents sur le classpath, puis évalue les conditions
+(`@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty`...) de chaque classe listée. Celles
+qui passent deviennent des classes `@Configuration` comme la tienne, avec leurs méthodes `@Bean`.
+
+**L'observer.**
+
+- Compter les candidates du projet (70 au moment de l'écriture de cette fiche) :
+  ```bash
+  cd server
+  ./mvnw -q dependency:build-classpath -Dmdep.outputFile=/dev/stdout | tr ':' '\n' \
+    | while read j; do unzip -p "$j" META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports 2>/dev/null; done \
+    | grep -v '^#' | grep -c .
+  ```
+- Ouvrir `DataSourceAutoConfiguration` dans l'IDE (recherche de classe, puis télécharger les sources) : c'est du
+  Java ordinaire, des méthodes `@Bean` protégées par des conditions. Tu pourrais l'écrire.
+- Croiser avec le rapport de l'exercice 4 (`--debug`), qui dit pour chacune pourquoi elle a été retenue ou écartée.
+
+**La source.** [Auto-configuration](https://docs.spring.io/spring-boot/reference/using/auto-configuration.html),
+[Creating Your Own Auto-configuration](https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html).
+
+### 4.7 Le refaire toi-même : un conteneur en 40 lignes
+
+Le meilleur moyen de démystifier l'injection est d'en écrire une. Crée ce fichier **hors du projet** (par exemple
+dans un dossier `~/mini-spring/`) et lance-le avec `java MiniSpring.java`, sans Maven ni compilation séparée :
+
+```java
+import java.lang.reflect.Constructor;
+import java.util.HashMap;
+import java.util.Map;
+
+public class MiniSpring {
+
+	// Trois classes ordinaires, sans aucune annotation
+	static class Repository {
+	}
+
+	static class Service {
+		final Repository repository;
+
+		Service(Repository repository) {
+			this.repository = repository;
+		}
+	}
+
+	static class Controller {
+		final Service service;
+
+		Controller(Service service) {
+			this.service = service;
+		}
+	}
+
+	// Le "conteneur" : un type -> son unique instance
+	static final Map<Class<?>, Object> singletons = new HashMap<>();
+
+	static Object getBean(Class<?> type) throws Exception {
+		Object existing = singletons.get(type);
+		if (existing != null) {
+			return existing;                                                    // singleton : créé une seule fois
+		}
+		Constructor<?> constructor = type.getDeclaredConstructors()[0];        // le constructeur unique
+		Object[] args = new Object[constructor.getParameterCount()];
+		for (int i = 0; i < args.length; i++) {
+			args[i] = getBean(constructor.getParameterTypes()[i]);              // résolution récursive, par type
+		}
+		Object bean = constructor.newInstance(args);
+		singletons.put(type, bean);
+		return bean;
+	}
+
+	public static void main(String[] args) throws Exception {
+		Controller controller = (Controller) getBean(Controller.class);
+		System.out.println(controller.service.repository);
+		System.out.println(getBean(Service.class) == controller.service);      // true : même instance
+	}
+}
+```
+
+Compare avec 4.1 : `getBean` récursif, registre des singletons, résolution par le type des paramètres du
+constructeur. C'est le cœur de Spring. Ce qui lui manque, et que tu as vu dans cette section : le scan des
+annotations, le choix entre plusieurs candidats (4.2), les `BeanPostProcessor` et les proxies (4.4).
+
+**Défis :**
+
+1. Fais dépendre `Repository` de `Controller`. Que se passe-t-il, et pourquoi ?
+2. Corrige `getBean` pour afficher un message clair à la place, comme le fait Spring.
+
+<details><summary>Réponses</summary>
+
+1. Une `StackOverflowError` : `getBean` s'appelle à l'infini, Controller → Service → Repository → Controller...
+2. Garde un `Set<Class<?>>` des types "en cours de création". Ajoute le type au début de `getBean`, retire-le une
+   fois l'objet créé. Si le type demandé est déjà dans l'ensemble, c'est un cycle : lève une exception qui
+   l'affiche. Spring fait exactement cela (`BeanCurrentlyInCreationException`), d'où le message de l'exercice 3.
+</details>
+
+---
+
+## 5. À toi de jouer
 
 **Exercice 1 : retirer un stéréotype.**
 Retire temporairement `@Service` de `TaskService` et lance l'application.
@@ -279,7 +548,8 @@ a bean of type TaskService that could not be found". Remets l'annotation.
 
 **Exercice 2 : deux candidats pour une interface.**
 Dans `SecurityConfig`, ajoute temporairement une deuxième méthode `@Bean` qui renvoie un autre `PasswordEncoder`
-(par exemple `new BCryptPasswordEncoder(12)`).
+(par exemple `new BCryptPasswordEncoder(12)`). Nomme la méthode `strongEncoder`, **pas** `passwordEncoder` (4.2
+explique pourquoi).
 *À observer* : échec au démarrage, Spring trouve deux beans pour un seul point d'injection. Essaie d'ajouter
 `@Primary` sur l'un des deux : l'application redémarre. Retire ensuite le bean ajouté.
 
@@ -296,7 +566,7 @@ et écartées ("Negative matches"), avec la raison. Cherche par exemple ce qui c
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -310,7 +580,7 @@ et écartées ("Negative matches"), avec la raison. Cherche par exemple ce qui c
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **Scopes autres que singleton** : `prototype` (nouvelle instance à chaque injection), `request`, `session`.
 - **`@Profile`** : un bean qui n'existe que dans un profil donné (voir [03. Configuration](03-configuration.md)).
@@ -318,12 +588,13 @@ et écartées ("Negative matches"), avec la raison. Cherche par exemple ce qui c
 - **Événements Spring** ⏳ (`ApplicationEventPublisher`) : découpler deux beans sans qu'ils se connaissent.
 - **`@Async` / `@Scheduled`** ⏳ : reposent aussi sur des proxies.
 - **AOP** : écrire ses propres aspects (journalisation, mesure de temps) avec `@Aspect`.
-- **Docs officielles** : Spring Framework Reference, chapitre "The IoC Container" ; Spring Boot Reference,
-  sections "Spring Beans and Dependency Injection" et "Auto-configuration".
+- **Docs officielles** : en plus des liens de la section 4,
+  [Spring Beans and Dependency Injection](https://docs.spring.io/spring-boot/reference/using/spring-beans-and-dependency-injection.html)
+  côté Spring Boot.
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Pourquoi `TaskService` n'a-t-il pas besoin de `@Autowired` sur son constructeur ?**
 <details><summary>Réponse</summary>

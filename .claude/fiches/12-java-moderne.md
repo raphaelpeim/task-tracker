@@ -6,6 +6,8 @@
 - `Optional` et les annotations de nullabilité, pour traiter l'absence de valeur
 - Le *pattern matching* (`instanceof` avec variable), les collections immuables, `getFirst()`
 - Quelques réflexes de qualité : immutabilité, `Locale.ROOT`, Javadoc, classes utilitaires
+- Ce que le compilateur génère vraiment pour les records, les enums, les lambdas et le *pattern matching*, et
+  comment le lire toi-même dans les `.class` du projet avec `javap`
 
 **Prérequis** : aucun, cette fiche peut se lire à tout moment. Elle éclaire le code cité dans toutes les autres,
 en particulier [04. Architecture en couches](04-architecture-couches.md).
@@ -70,7 +72,7 @@ p.equals(new Point(1, 2));        // true : comparaison par valeur
 ```
 
 On peut ajouter des méthodes, ou **redéfinir** une méthode générée (comme `toString`). On ne peut pas ajouter de
-champ modifiable.
+champ d'instance en dehors des composants (seulement des champs `static`), et les composants sont `final`.
 
 **Pourquoi pas pour une entité JPA ?** Hibernate a besoin d'un constructeur sans argument, de champs modifiables
 (il remplit l'objet après l'avoir créé, puis suit ses modifications) et d'une classe qu'il peut étendre pour le
@@ -341,7 +343,316 @@ globalement.
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Les sections précédentes disent **ce que** permet le langage. Celle-ci montre **ce que le compilateur en fait** :
+la JVM ne connaît ni les records, ni les lambdas, ni le *pattern matching* sous la forme où tu les écris. `javac`
+les traduit en bytecode ordinaire, parfois avec un peu d'aide de la bibliothèque standard au démarrage. Rien n'est
+caché : tout se lit dans les `.class` du projet. Même plan que la fiche 02 : le mécanisme réel, comment
+l'observer, la source.
+
+L'outil d'observation est `javap`, le désassembleur fourni avec le JDK. Compile d'abord, depuis `server/` :
+
+```bash
+./mvnw compile
+javap -p -cp target/classes <nom.complet.de.la.Classe>      # la liste des membres, privés compris
+javap -c -p -cp target/classes <...>                         # + le bytecode de chaque méthode
+javap -v -p -cp target/classes <...>                         # + tous les attributs (annotations, noms de paramètres...)
+```
+
+### 4.1 Un record est une classe finale dont `javac` écrit le corps
+
+**Le mécanisme.** Pour `record TaskResponseDto(...)`, `javac` produit une classe tout à fait ordinaire. Sortie
+réelle de `javap -p -cp target/classes com.personal.task_tracker.task.dto.TaskResponseDto`, abrégée :
+
+```
+public final class com.personal.task_tracker.task.dto.TaskResponseDto extends java.lang.Record {
+  private final java.lang.Long id;
+  private final java.lang.String title;
+  ...
+  public com.personal.task_tracker.task.dto.TaskResponseDto(java.lang.Long, java.lang.String, ...);
+  public final java.lang.String toString();
+  public final int hashCode();
+  public final boolean equals(java.lang.Object);
+  public java.lang.Long id();
+  public java.lang.String title();
+  ...
+}
+```
+
+Tout ce que dit 2.1 est là : champs `private final`, constructeur canonique, accesseurs sans `get`. Et un détail qui
+explique la remarque sur les entités : la classe est **`final`**. Hibernate ne pourrait pas en générer de
+sous-classe pour le chargement LAZY.
+
+Ce qui est moins attendu, c'est le corps de `toString`, `equals` et `hashCode`. `javap -c` montre que `javac` ne les
+écrit pas champ par champ :
+
+```
+  public final java.lang.String toString();
+    Code:
+         0: aload_0
+         1: invokedynamic #43,  0             // InvokeDynamic #0:toString:(Lcom/personal/task_tracker/task/dto/TaskResponseDto;)Ljava/lang/String;
+         6: areturn
+```
+
+`invokedynamic` signifie "au premier appel, demande à une méthode de la bibliothèque standard de fabriquer
+l'implémentation". Ici, `javap -v` indique laquelle, `java.lang.runtime.ObjectMethods.bootstrap`, et ce qu'on lui
+passe : la liste des composants (`id;title;description;...`) et un accès direct à chaque champ. L'implémentation est
+donc construite une fois, au démarrage, à partir de cette description. Avantage : le bytecode reste minuscule, et une
+JVM plus récente peut fournir une implémentation plus rapide sans recompiler ton code.
+
+Le compilateur ajoute enfin un attribut `Record` (visible avec `javap -v`) qui liste les composants. C'est lui que
+lit `Class.getRecordComponents()`, et c'est ainsi qu'une bibliothèque comme Jackson sait qu'un record a les
+composants `id`, `title`... sans chercher de getters.
+
+Pour `RegisterRequestDto`, qui redéfinit `toString`, la méthode n'est plus `final` (c'est la tienne) et son
+bytecode n'utilise plus `ObjectMethods` : il lit les quatre champs puis appelle
+`invokedynamic ... makeConcatWithConstants`. C'est le même principe appliqué à ta concaténation
+`"RegisterRequestDto[firstname=" + firstname + ...` : depuis Java 9, `javac` ne génère plus de `StringBuilder`, il
+délègue l'assemblage de la chaîne à `StringConcatFactory`. Le `password` n'est jamais lu par cette méthode :
+`javap -c` le prouve, il n'y a que quatre `getfield`.
+
+**L'observer.**
+
+```bash
+javap -c -p -cp target/classes com.personal.task_tracker.task.dto.TaskResponseDto | sed -n '/toString()/,/areturn/p'
+javap -v -p -cp target/classes com.personal.task_tracker.task.dto.TaskResponseDto | grep -A12 'BootstrapMethods:'
+javap -c -p -cp target/classes com.personal.task_tracker.auth.dto.RegisterRequestDto | sed -n '/String toString()/,/areturn/p'
+```
+
+**La source.** [JEP 395 : Records](https://openjdk.org/jeps/395),
+[java.lang.Record](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Record.html),
+[ObjectMethods](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/runtime/ObjectMethods.html),
+[JEP 280 : Indify String Concatenation](https://openjdk.org/jeps/280),
+[javap](https://docs.oracle.com/en/java/javase/25/docs/specs/man/javap.html).
+
+### 4.2 Où atterrissent les annotations d'un composant de record
+
+**Le mécanisme.** Dans `RegisterRequestDto`, tu poses `@NotBlank` sur le composant `password`. Mais un composant
+n'existe pas dans le bytecode : il devient un champ, un accesseur et un paramètre du constructeur. `javac` recopie
+l'annotation **sur chacun de ces éléments où son `@Target` l'autorise**. Constat avec `javap -v -p` sur le projet :
+
+| Annotation | Champ `password` | Accesseur `password()` | Paramètre du constructeur |
+|---|---|---|---|
+| `@NotBlank`, `@Size` (cibles larges, dont `METHOD`) | oui | oui | oui |
+| `@MaxBytes` (`@Target({FIELD, PARAMETER, RECORD_COMPONENT})`) | oui | **non** | oui |
+
+C'est donc le `@Target` que tu écris dans `MaxBytes.java` qui décide où l'annotation existera. Hibernate Validator
+trouve ensuite les contraintes en lisant ces éléments par réflexion.
+
+L'autre méta-annotation, `@Retention(RUNTIME)`, n'est pas décorative non plus : elle demande au compilateur de
+garder l'annotation dans le `.class` **et** de la rendre lisible par réflexion.
+
+**Si on la retire.** Vérifié sur le projet : en passant temporairement `MaxBytes` en `@Retention(RetentionPolicy.CLASS)`
+(l'annotation reste dans le fichier `.class`, mais la réflexion ne la voit plus), tout compile, et le test
+`AuthControllerTest.shouldReturn400WhenPasswordExceeds72BytesWithFewerCharacters` échoue :
+`Expected status code <400> but was <500>`. Le log montre ce qui s'est passé :
+
+```
+java.lang.IllegalArgumentException: password cannot be more than 72 bytes
+```
+
+Hibernate Validator n'a pas vu la contrainte, le mot de passe de 80 octets est arrivé jusqu'à BCrypt, qui l'a
+refusé. Aucune erreur, aucun avertissement au démarrage : une contrainte invisible est simplement ignorée.
+
+**L'observer.**
+
+```bash
+javap -v -p -cp target/classes com.personal.task_tracker.auth.dto.RegisterRequestDto | sed -n '/public java.lang.String password();/,/public java.lang.String/p'
+```
+
+Tu y vois `RuntimeVisibleAnnotations` avec `@NotBlank` et `@Size`, mais pas `@MaxBytes`.
+
+**La source.** [JLS 8.10.3 : Record Members](https://docs.oracle.com/javase/specs/jls/se25/html/jls-8.html#jls-8.10.3)
+(propagation des annotations des composants),
+[RetentionPolicy](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/annotation/RetentionPolicy.html).
+
+### 4.3 Un enum est une classe avec des constantes numérotées
+
+**Le mécanisme.** `enum TaskStatus { BACKLOG, READY, ... }` devient, d'après `javap -p` :
+
+```
+public final class com.personal.task_tracker.task.enums.TaskStatus extends java.lang.Enum<com.personal.task_tracker.task.enums.TaskStatus> {
+  public static final com.personal.task_tracker.task.enums.TaskStatus BACKLOG;
+  public static final com.personal.task_tracker.task.enums.TaskStatus READY;
+  ...
+  private static final com.personal.task_tracker.task.enums.TaskStatus[] $VALUES;
+  public static com.personal.task_tracker.task.enums.TaskStatus[] values();
+  public static com.personal.task_tracker.task.enums.TaskStatus valueOf(java.lang.String);
+  private com.personal.task_tracker.task.enums.TaskStatus();
+  ...
+  static {};
+}
+```
+
+Chaque constante est un objet unique, créé une seule fois dans le bloc `static {}`. `javap -c` montre comment :
+
+```
+         0: new           #1                  // class com/personal/task_tracker/task/enums/TaskStatus
+         3: dup
+         4: ldc           #47                 // String BACKLOG
+         6: iconst_0
+         7: invokespecial #48                 // Method "<init>":(Ljava/lang/String;I)V
+```
+
+Le constructeur reçoit en réalité deux arguments cachés : le **nom** (`"BACKLOG"`) et un **numéro d'ordre**
+(`0`, puis `1` pour `READY`...), l'`ordinal`. `valueOf("READY")` retrouve la constante par son nom ; Jackson
+fait de même, par défaut, pour lire `"status": "READY"` dans un JSON, et écrit le nom (pas l'ordinal) en sortie.
+
+**Pourquoi `@Enumerated(EnumType.STRING)` dans `Task`.** JPA peut stocker un enum par son ordinal (le défaut) ou par
+son nom. L'ordinal dépend uniquement de **l'ordre de déclaration** : insérer un statut entre `BACKLOG` et `READY`
+décalerait tous les numéros, et chaque ligne déjà en base désignerait alors un autre statut, sans aucune erreur.
+Stocker le nom évite ce piège (et la colonne reste lisible en SQL). Le risque se déplace : **renommer** une
+constante casse la lecture des lignes existantes, d'où la contrainte `CHECK` côté base (voir
+[08. Persistance](08-persistance.md)).
+
+**L'observer.** `TaskStatus.READY.ordinal()` renvoie `1`, `TaskStatus.values().length` renvoie `8` (voir 4.6 pour
+un programme qui l'affiche).
+
+**La source.** [JLS 8.9 : Enum Classes](https://docs.oracle.com/javase/specs/jls/se25/html/jls-8.html#jls-8.9),
+[java.lang.Enum](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Enum.html).
+
+### 4.4 Une lambda n'est pas une classe anonyme
+
+**Le mécanisme.** Avant Java 8, l'équivalent d'une lambda était une classe anonyme, compilée dans un fichier à part
+(`TaskService$1.class`). Regarde `target/classes/com/personal/task_tracker/task/service/` : il n'y a que
+`TaskService.class`. Les lambdas y sont traduites autrement.
+
+1. **Le corps de la lambda devient une méthode privée** de la classe. `javap -p` sur `TaskService` en montre une :
+   ```
+   private static com.personal.task_tracker.task.exception.TaskNotFoundException lambda$findTaskById$0(java.lang.Long);
+   ```
+   C'est `() -> new TaskNotFoundException("There is no task with id: " + taskId)`. La lambda n'a aucun paramètre,
+   mais la méthode en reçoit un : `taskId`, la variable **capturée**, est passée par valeur au moment où la lambda
+   est créée. Voilà pourquoi Java exige qu'une variable capturée soit *effectivement finale* : la lambda en reçoit
+   une copie, une modification ultérieure ne pourrait pas lui parvenir.
+2. **À l'endroit où la lambda est créée**, `javac` place un `invokedynamic` qui confie la fabrication de l'objet à
+   `LambdaMetafactory` :
+   ```
+   26: invokedynamic #39,  0             // InvokeDynamic #0:apply:()Ljava/util/function/Function;
+   11: invokedynamic #125,  0            // InvokeDynamic #1:get:(Ljava/lang/Long;)Ljava/util/function/Supplier;
+   ```
+   La première est `.map(TaskMapper::toTaskResponseDto)` dans `getAllTasks`, la seconde la lambda de
+   `findTaskById`, qui reçoit le `Long` capturé. Pour la **référence de méthode**, aucune méthode privée n'est
+   générée : `javap -v` montre que `LambdaMetafactory` reçoit directement
+   `REF_invokeStatic com/personal/task_tracker/task/mapper/TaskMapper.toTaskResponseDto`.
+3. **Au premier passage**, `LambdaMetafactory` génère en mémoire une petite classe qui implémente `Function` (ou
+   `Supplier`) et appelle la méthode cible. C'est une classe *cachée* (*hidden class*), qui n'existe dans aucun
+   fichier.
+
+**L'observer.** Les points 1 et 2 :
+
+```bash
+javap -p -cp target/classes com.personal.task_tracker.task.service.TaskService | grep lambda
+javap -c -p -cp target/classes com.personal.task_tracker.task.service.TaskService | grep invokedynamic
+```
+
+Pour le point 3, affiche la classe d'une lambda (programme de 4.6 ou n'importe quel test) :
+`mapper.getClass().getName()` donne un nom de la forme `LambdaProbe$$Lambda/0x000007c001158210` (le nom de la
+classe qui crée la lambda, puis une adresse qui change à chaque exécution), et `getClass().isHidden()` renvoie
+`true`. Même famille de noms que les `$$SpringCGLIB$$0` de la fiche 02 : une classe écrite en mémoire au démarrage.
+
+**La source.** [JLS 15.27 : Lambda Expressions](https://docs.oracle.com/javase/specs/jls/se25/html/jls-15.html#jls-15.27),
+[LambdaMetafactory](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/invoke/LambdaMetafactory.html),
+[JEP 371 : Hidden Classes](https://openjdk.org/jeps/371).
+
+### 4.5 Le *pattern matching* n'existe pas dans le bytecode
+
+**Le mécanisme.** `instanceof ConstraintViolationException cve` est un pur confort d'écriture. Le bytecode de
+`UserService.java:84` est exactement celui qu'aurait produit la version "test puis cast" de 2.5 :
+
+```
+107: instanceof    #127                // class org/hibernate/exception/ConstraintViolationException
+110: ifeq          128
+113: aload         9
+115: checkcast     #127                // class org/hibernate/exception/ConstraintViolationException
+118: astore        8
+```
+
+`instanceof` teste, `checkcast` convertit, `astore` range le résultat dans une variable locale (`cve`). Aucun coût
+supplémentaire à l'exécution, et aucune nouveauté pour la JVM : le compilateur a écrit le cast pour toi, et
+vérifie à ta place que la variable n'est utilisée que là où le test a réussi.
+
+Même constat pour `@Nullable` et `@NonNull` (2.7) : `javap -v` sur `GlobalExceptionHandler` montre que jspecify
+les place bien dans le bytecode (`RuntimeVisibleTypeAnnotations`), mais **aucun** code du projet ou de Spring ne les
+lit pour bloquer une valeur à l'exécution. Contrairement à `@MaxBytes` (4.2), les retirer ne changerait rien au
+comportement de l'application, seulement aux avertissements de l'IDE.
+
+**L'observer.**
+
+```bash
+javap -c -p -cp target/classes com.personal.task_tracker.user.service.UserService | grep -B2 -A6 instanceof
+```
+
+**La source.** [JEP 394 : Pattern Matching for instanceof](https://openjdk.org/jeps/394),
+[Pattern Matching for instanceof (guide Oracle)](https://docs.oracle.com/en/java/javase/25/language/pattern-matching-instanceof.html).
+
+### 4.6 Le refaire toi-même : lire un record comme Jackson
+
+Jackson ne connaît pas `TaskResponseDto` à l'avance. Il découvre ses composants par réflexion, grâce à l'attribut
+`Record` vu en 4.1. Ce petit programme fait la même chose. Crée-le **hors du projet** (par exemple
+`~/probe/RecordProbe.java`) et lance-le contre les classes compilées du projet, sans Maven :
+
+```java
+import com.personal.task_tracker.task.dto.TaskResponseDto;
+import com.personal.task_tracker.task.enums.TaskStatus;
+import java.lang.reflect.RecordComponent;
+
+public class RecordProbe {
+	public static void main(String[] args) throws Exception {
+		TaskResponseDto dto = new TaskResponseDto(1L, "Titre", null, null, TaskStatus.READY, null, null, null, null);
+		System.out.println(TaskResponseDto.class.isRecord());
+		for (RecordComponent component : TaskResponseDto.class.getRecordComponents()) {
+			System.out.println(component.getName() + " = " + component.getAccessor().invoke(dto));   // "clé" = valeur
+		}
+		System.out.println(dto);
+		System.out.println(TaskStatus.READY.ordinal() + " " + TaskStatus.valueOf("READY") + " " + TaskStatus.values().length);
+	}
+}
+```
+
+```bash
+java -cp server/target/classes ~/probe/RecordProbe.java
+```
+
+Sortie réelle :
+
+```
+true
+id = 1
+title = Titre
+description = null
+type = null
+status = READY
+priority = null
+assignee = null
+createdDate = null
+updatedDate = null
+TaskResponseDto[id=1, title=Titre, description=null, type=null, status=READY, priority=null, assignee=null, createdDate=null, updatedDate=null]
+1 READY 8
+```
+
+Remplace l'affichage par l'écriture de `"nom": valeur` et tu as l'essentiel d'un sérialiseur JSON pour records.
+Ce qui manque par rapport à Jackson : les types imbriqués (`assignee` est lui-même un record), les dates, les
+`JsonNullable`, la configuration. Le principe, lui, est le même.
+
+**Défi :** ajoute une ligne qui affiche `getRecordComponents()` pour une **classe** classique, l'entité
+`com.personal.task_tracker.task.entity.Task`. Que renvoie la méthode, et qu'en déduis-tu sur la façon dont Jackson
+doit traiter une classe qui n'est pas un record ? (Des avertissements `unknown enum constant` peuvent s'afficher à
+la compilation du programme : les annotations JPA de `Task` ne sont pas sur ce classpath. Ils sont sans
+conséquence ici.)
+
+<details><summary>Réponse</summary>
+
+`getRecordComponents()` renvoie `null` (vérifié) pour une classe qui n'est pas un record. Jackson doit alors
+chercher autre chose : les getters (`getTitle()`), les champs publics, ou des annotations comme `@JsonProperty`.
+Une classe classique aux champs privés doit donc exposer des getters (ou être annotée) pour être sérialisée, alors
+qu'un record n'en a pas besoin : ses composants sont déclarés dans le bytecode.
+</details>
+
+---
+
+## 5. À toi de jouer
 
 **Exercice 1 : observer le code généré d'un record.** Dans un test, ou dans une petite classe `main` jetable :
 
@@ -355,7 +666,7 @@ System.out.println(a == b);
 
 À observer : un `toString` lisible généré, `equals` vrai (comparaison des valeurs) et `==` faux (deux objets
 distincts). Ensuite, dans l'IDE, ouvre la vue « Structure » de `TaskResponseDto` : tu y verras les accesseurs et
-méthodes générés, absents du fichier source.
+méthodes générés, absents du fichier source. Pour le bytecode lui-même, voir `javap` en section 4.1.
 
 **Exercice 2 : réécrire un stream en boucle, et inversement.** Réécris `UserService.getAllUsers` avec une boucle
 `for`, puis compare les deux versions. Ensuite, essaie d'ajouter un élément à la liste renvoyée par le stream
@@ -379,7 +690,7 @@ Annule ensuite ta modification.
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -394,7 +705,7 @@ Annule ensuite ta modification.
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **`switch` expressions et pattern matching dans `switch`** (Java 21) : `switch` qui renvoie une valeur et
   distingue les types, utile par exemple pour traduire un statut en libellé.
@@ -406,12 +717,13 @@ Annule ensuite ta modification.
 - **Text blocks** (`"""`, Java 15) : chaînes sur plusieurs lignes, pratiques pour du JSON dans les tests.
 - **MapStruct** : générer les mappers au lieu de les écrire à la main.
 - **NullAway ou l'inspection de l'IDE** : faire respecter les annotations jspecify à la compilation.
-- **Documentation officielle** : « Java Language Updates » (Oracle) qui liste les nouveautés par version ; le site
-  jspecify.dev ; les JEP 395 (records) et 394 (pattern matching pour `instanceof`).
+- **Documentation officielle** : en plus des liens de la section 4 (JEP 395 pour les records, JEP 394 pour le
+  *pattern matching*, `javap`, `LambdaMetafactory`, la spécification du langage), « Java Language Updates »
+  (Oracle) qui liste les nouveautés par version, et le site jspecify.dev.
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Quelles méthodes Java génère-t-il pour `record Point(int x, int y)` ?**
 

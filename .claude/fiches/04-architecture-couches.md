@@ -5,6 +5,8 @@
 - Le trajet complet d'une requête HTTP, du client jusqu'à la base et retour
 - La différence entre une entité et un DTO, et le rôle du mapper
 - Pourquoi les packages sont organisés par fonctionnalité (`task/`, `user/`, `auth/`)
+- Ce que Spring impose (presque rien), le seul mécanisme réel lié aux couches (la traduction d'exceptions), et ce
+  qui casse concrètement quand on les mélange, observé sur le projet
 
 **Prérequis** : [02. Beans et injection](02-beans-injection.md). Utile ensuite : [05. Web et REST](05-web-rest.md),
 [08. Persistance](08-persistance.md), [09. Transactions](09-transactions.md).
@@ -252,7 +254,153 @@ services.
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Contrairement aux fiches 02 et 03, il y a peu de "magie" ici : l'architecture en couches est une **convention**, et
+Spring n'en impose presque rien. Cette section montre ce que Spring ne vérifie pas, le seul mécanisme réel attaché à
+une couche (la traduction d'exceptions), puis **ce qui casse concrètement** quand on mélange les couches. Chaque
+observation a été faite sur le projet avec un test temporaire qui étend `IntegrationTest` (méthode décrite dans
+[03. Configuration](03-configuration.md), section 4), puis supprimé.
+
+### 4.1 Ce que Spring impose : presque rien
+
+**Le mécanisme.** `@Service`, `@Repository` et `@RestController` sont tous des `@Component` pour le scan (voir
+[02. Beans et injection](02-beans-injection.md), section 2.2). Spring construit le graphe des beans
+(02, section 4.1) quel que soit le sens des flèches : un controller qui demande un `TaskRepository` dans son
+constructeur le reçoit, sans erreur ni avertissement. La règle "Controller → Service → Repository" n'existe que dans
+ta tête et en revue de code. La seule chose que Spring refuse est le **cycle** (02, section 2.8), ce qui protège en
+partie le sens des dépendances entre services : puisque `TaskService` dépend de `UserService`, l'inverse est
+impossible par constructeur.
+
+**L'observer.** Expérience faite sur le projet : retire `@Repository` de `UserRepository`. Le contexte démarre, le
+repository est toujours un bean et fonctionne. Spring Data reconnaît ses repositories à leur **type** (une interface
+qui étend `JpaRepository`), pas à l'annotation. Le log de démarrage le dit (extrait réel de
+`./mvnw spring-boot:run`) :
+
+```
+Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+Finished Spring Data repository scanning in 22 ms. Found 2 JPA repository interfaces.
+```
+
+Sur `TaskRepository` et `UserRepository`, `@Repository` est donc redondant pour Spring : il documente le rôle de la
+classe. Remets-le après l'essai.
+
+**La source.** [Classpath Scanning and Managed Components](https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html),
+[Spring Data, Core concepts](https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html).
+
+### 4.2 La traduction d'exceptions : la seule "magie" de la couche repository
+
+**Le mécanisme.** Quand PostgreSQL refuse une ligne, l'erreur traverse trois couches techniques avant d'arriver dans
+ton code :
+
+1. le driver JDBC lève une `org.postgresql.util.PSQLException` ;
+2. Hibernate l'enveloppe dans sa propre `org.hibernate.exception.ConstraintViolationException` ;
+3. Spring l'enveloppe à son tour dans une `org.springframework.dao.DataIntegrityViolationException`, qui fait partie
+   d'une hiérarchie (`DataAccessException`) **indépendante de la technologie**.
+
+L'étape 3 est faite par un proxy autour du repository, qui contient un `PersistenceExceptionTranslationInterceptor`.
+Celui-ci interroge les traducteurs disponibles, ici `HibernateJpaDialect`, qui délègue à
+`HibernateExceptionTranslator`. Pour une classe que tu écrirais toi-même et annoterais `@Repository`, c'est le
+`BeanPostProcessor` `PersistenceExceptionTranslationPostProcessor` (présent dans le contexte du projet) qui pose ce
+proxy, sur le principe vu en 02, section 4.4. Pour une interface Spring Data, Spring Data l'ajoute lui-même au proxy
+qu'il génère (02, section 4.5).
+
+**L'observer.** Le test temporaire enregistre deux utilisateurs avec le même email via
+`userRepository.saveAndFlush(...)` et affiche la chaîne des causes, puis les lignes de la pile qui contiennent
+"Translat" ou "JpaDialect". Sortie réelle :
+
+```
+org.springframework.dao.DataIntegrityViolationException : could not execute statement [ERROR: duplicate key value violates unique constraint "app_user_email_key"
+org.hibernate.exception.ConstraintViolationException : could not execute statement [ERROR: duplicate key value violates unique constraint "app_user_email_key"
+org.postgresql.util.PSQLException : ERROR: duplicate key value violates unique constraint "app_user_email_key"
+  at org.springframework.orm.jpa.hibernate.HibernateExceptionTranslator.convertHibernateAccessException(HibernateExceptionTranslator.java:169)
+  ...
+  at org.springframework.orm.jpa.vendor.HibernateJpaDialect.translateExceptionIfPossible(HibernateJpaDialect.java:223)
+  at org.springframework.dao.support.ChainedPersistenceExceptionTranslator.translateExceptionIfPossible(ChainedPersistenceExceptionTranslator.java:61)
+  at org.springframework.dao.support.PersistenceExceptionTranslationInterceptor.invoke(PersistenceExceptionTranslationInterceptor.java:157)
+```
+
+Et avec `@Repository` retiré de `UserRepository` (4.1) ? **Exactement la même chaîne** : pour un repository Spring
+Data, la traduction ne dépend pas de l'annotation.
+
+**Pourquoi c'est nécessaire.** Regarde `UserService.createUser`
+(`server/src/main/java/com/personal/task_tracker/user/service/UserService.java:81-92`) : il attrape
+`DataIntegrityViolationException`, un type Spring, pour transformer un doublon en `UserAlreadyExistsException`. Sans
+la traduction, le service devrait attraper une exception de PostgreSQL : la couche métier dépendrait du driver, et
+changer de base casserait du code métier. Note l'entorse assumée ligne 84 : pour lire le **nom** de la contrainte,
+le service descend quand même jusqu'à la cause Hibernate. La traduction couvre le cas général, pas tous les détails.
+
+Corollaire : un `catch (PSQLException e)` dans un service ne se déclencherait **jamais**, l'exception arrive déjà
+traduite.
+
+**La source.** [Consistent Exception Hierarchy](https://docs.spring.io/spring-framework/reference/data-access/dao.html#dao-exceptions),
+[Annotations Used to Configure DAO or Repository Classes](https://docs.spring.io/spring-framework/reference/data-access/dao.html#dao-annotations),
+[Exception Translation (ORM)](https://docs.spring.io/spring-framework/reference/data-access/orm/general.html#orm-exception-translation).
+
+### 4.3 Pourquoi le mapping se fait dans le service : le proxy Hibernate
+
+**Le mécanisme.** `Task.assignee` est déclaré `@ManyToOne(fetch = FetchType.LAZY)`
+(`server/src/main/java/com/personal/task_tracker/task/entity/Task.java:38-41`). Quand Hibernate charge une tâche,
+il ne charge pas l'utilisateur : il met à sa place un **proxy**, une sous-classe d'`AppUser` générée, qui ne connaît
+que l'identifiant. Au premier accès à ses données, le proxy demande à la session Hibernate de faire le `SELECT`. Or
+cette session ne vit que le temps de la transaction ouverte par le service (`@Transactional`, voir 02, section 4.4),
+et `spring.jpa.open-in-view=false` interdit de la prolonger jusqu'au controller.
+
+**L'observer.** Le test temporaire charge une tâche assignée avec `taskRepository.findById(...)` **hors de toute
+transaction de service**, comme le ferait un controller qui court-circuiterait la couche service, puis appelle
+`TaskMapper.toTaskResponseDto`. Sortie réelle :
+
+```
+assignee class = com.personal.task_tracker.user.entity.AppUser$HibernateProxy
+org.hibernate.LazyInitializationException : Could not initialize proxy [com.personal.task_tracker.user.entity.AppUser#1] - no session
+```
+
+C'est pour ça que l'étape ⑪ du schéma de 2.4 (entité → DTO) a lieu **dans** le service. Détails et autres
+solutions dans [09. Transactions](09-transactions.md).
+
+### 4.4 Pourquoi un DTO : ce que Jackson ferait d'une entité
+
+**Le mécanisme.** Jackson (le bean `jacksonJsonMapper`, un `JsonMapper` de Jackson 3 créé par l'auto-configuration)
+transforme en propriété JSON **chaque getter public**. Il ne sait pas ce qui est sensible, ni ce qui est un proxy
+Hibernate.
+
+**L'observer.** Le test temporaire passe directement les entités au `JsonMapper` du contexte. Sortie réelle (le hash
+est une valeur factice créée pour l'essai) :
+
+```
+{"firstname":"Ada","lastname":"Lovelace","username":"ada","email":"ada@example.com","password":"$2a$10$hashFictif","role":"USER","createdDate":"2026-10-29T15:10:43.137805","id":1,"updatedDate":null}
+```
+
+Et pour une `Task` dont l'assigné est le proxy de 4.3 :
+
+```
+tools.jackson.databind.DatabindException : Could not initialize proxy [com.personal.task_tracker.user.entity.AppUser#1] - no session
+org.hibernate.LazyInitializationException : Could not initialize proxy [com.personal.task_tracker.user.entity.AppUser#1] - no session
+```
+
+Les raisons de 2.2 (sécurité, découplage) ne sont donc pas qu'une question de style : renvoyer `AppUser` publierait
+le hash et le rôle, et renvoyer `Task` entraînerait les proxies Hibernate dans la sérialisation.
+
+**Et les mappers ?** Aucun mécanisme Spring : des méthodes statiques en Java pur (`TaskMapper.java:11-12`, le
+constructeur privé). Il n'y a rien à observer, et c'est voulu : c'est le seul maillon de la chaîne entièrement
+explicite. Une bibliothèque comme MapStruct génère ce même code à la compilation à partir d'une interface.
+
+**La source.** [Spring Boot, JSON](https://docs.spring.io/spring-boot/reference/features/json.html),
+[JPA (Spring Framework)](https://docs.spring.io/spring-framework/reference/data-access/orm/jpa.html).
+
+### 4.5 Récapitulatif : ce qui casse si on mélange les couches
+
+| Mélange | Ce qui se passe réellement | Vu en |
+|---|---|---|
+| Un controller injecte directement un repository | Rien : Spring l'accepte sans un mot, seule la revue de code le voit | 4.1 |
+| Le controller charge l'entité lui-même et la convertit | `LazyInitializationException` sur l'assigné | 4.3 |
+| Le controller renvoie l'entité | Hash du mot de passe dans le JSON ; erreur Jackson sur le proxy | 4.4 |
+| Le service attrape une exception du driver (`PSQLException`) | Le `catch` ne se déclenche jamais, l'exception arrive traduite | 4.2 |
+| `UserService` injecte `TaskService`, qui injecte déjà `UserService` | Refus de démarrer : dépendance circulaire | 02, exercice 3 |
+
+---
+
+## 5. À toi de jouer
 
 1. **Suivre une requête au débogueur.** Lance l'application (`./mvnw spring-boot:run -Dspring-boot.run.profiles=local`
    depuis `server/`, ou en debug dans l'IDE). Mets un point d'arrêt dans `TaskController.updatePartialTask`, un dans
@@ -271,7 +419,7 @@ services.
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -284,7 +432,7 @@ services.
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **MapStruct** : génère les mappers à la compilation à partir d'une interface. Utile quand les DTO deviennent
   nombreux ; ce projet préfère des mappers écrits à la main, plus explicites.
@@ -292,12 +440,16 @@ services.
   tout de Spring ni de JPA (voir [fiche inventaire, section 16](notions-spring-boot.md#16-au-delà-de-spring)).
 - **Événements Spring** ⏳ (`ApplicationEventPublisher`) : permettent à deux domaines de communiquer sans
   s'importer mutuellement.
-- Documentation : *Spring Framework Reference*, chapitre « Web MVC » ; *Spring Boot Reference*, section
-  « Structuring Your Code ».
+- **Faire respecter les couches automatiquement** : puisque Spring ne vérifie rien (4.1), des bibliothèques de test
+  comme [ArchUnit](https://www.archunit.org/) permettent d'écrire "aucune classe de `controller` n'importe un
+  `repository`" et de faire échouer le build sinon. Non utilisé dans ce projet.
+- Documentation : en plus des liens de la section 4, *Spring Boot Reference*,
+  [Structuring Your Code](https://docs.spring.io/spring-boot/reference/using/structuring-your-code.html) ; *Spring
+  Framework Reference*, chapitre [Web MVC](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet.html).
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Dans quelle couche décide-t-on qu'une création renvoie 201 plutôt que 200 ?**
 <details><summary>Réponse</summary>

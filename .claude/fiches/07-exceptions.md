@@ -6,6 +6,8 @@
 - Le format standard `ProblemDetail` (RFC 9457) et la propriété `code` ajoutée par le projet
 - Pourquoi les erreurs de sécurité ont leur propre gestionnaire
 - Comment traduire une erreur technique (contrainte en base) en erreur métier claire
+- Ce qui se passe vraiment derrière : la chaîne de résolveurs, le choix du handler, le format JSON réel, le filet
+  `/error` de Spring Boot, et pourquoi la sécurité échappe à l'advice
 
 **Prérequis** : [04. Architecture en couches](04-architecture-couches.md), [05. Web et REST](05-web-rest.md).
 Utile avant : [06. Validation](06-validation.md), qui détaille les erreurs 400 de validation.
@@ -111,7 +113,7 @@ ces champs :
 
 | Champ | Sens | Exemple |
 |---|---|---|
-| `type` | URI qui identifie le type d'erreur (`about:blank` par défaut) | `about:blank` |
+| `type` | URI qui identifie le type d'erreur ; absent, il vaut `about:blank` | (omis dans le projet) |
 | `title` | Résumé court, par défaut le libellé du statut | `Not Found` |
 | `status` | Code HTTP | `404` |
 | `detail` | Explication lisible de **ce** cas | `There is no task with id: 999` |
@@ -279,7 +281,6 @@ Réponse obtenue pour `GET /api/tasks/999` :
 
 ```json
 {
-  "type": "about:blank",
   "title": "Not Found",
   "status": 404,
   "detail": "There is no task with id: 999",
@@ -357,7 +358,303 @@ la sécurité : `:27` et `:39` via un contrôleur de test qui lève les exceptio
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Les sections précédentes disent **ce que** fait le gestionnaire d'erreurs. Celle-ci montre **comment** une exception
+voyage jusqu'à lui, qui le trouve, comment la bonne méthode est choisie, et ce qui arrive aux exceptions qu'il ne
+voit pas. Même plan que dans [02. Beans et injection](02-beans-injection.md) : le mécanisme réel, comment
+l'observer, la source. Les sorties citées ont été relevées sur le projet (Spring Boot 4.1.1, Spring Framework
+7.0.9, Spring Security 7.1.1) avec un test temporaire qui étend `IntegrationTest`, un contrôleur et un filtre de
+test.
+
+Les logs utiles, à passer en argument comme dans la fiche 02 :
+`logging.level.org.springframework.web.servlet.DispatcherServlet=DEBUG` et
+`logging.level.org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver=DEBUG`.
+
+### 4.1 Les deux mondes, vus dans la pile d'appels
+
+**Le mécanisme.** Le schéma de 2.7 n'est pas une image : c'est littéralement la pile d'appels Java. Tomcat appelle
+une chaîne de **filtres de servlet**, et le dernier maillon de cette chaîne est le `DispatcherServlet`. Chaque
+filtre appelle le suivant **à l'intérieur** de sa propre méthode `doFilter` : les filtres *entourent* le servlet,
+comme des poupées russes. Spring Security n'est qu'un de ces filtres, nommé `springSecurityFilterChain`, qui
+contient lui-même sa propre liste de filtres.
+
+Le `try/catch` qui mène à ton `@RestControllerAdvice` se trouve **dans** le `DispatcherServlet`. Une exception levée
+dans un filtre remonte vers Tomcat sans jamais y passer.
+
+**L'observer.**
+
+- Les filtres enregistrés auprès de Tomcat (lus dans le `ServletContext` du test ; cette liste n'est pas triée,
+  l'ordre d'exécution se lit dans la pile plus bas) :
+  ```
+  servlet filter 'requestContextFilter'      -> org.springframework.boot.servlet.filter.OrderedRequestContextFilter
+  servlet filter 'Tomcat WebSocket (JSR356) Filter' -> org.apache.tomcat.websocket.server.WsFilter
+  servlet filter 'characterEncodingFilter'   -> org.springframework.boot.servlet.filter.OrderedCharacterEncodingFilter
+  servlet filter 'springSecurityFilterChain' -> org.springframework.boot.web.servlet.DelegatingFilterProxyRegistrationBean$1
+  servlet filter 'formContentFilter'         -> org.springframework.boot.servlet.filter.OrderedFormContentFilter
+  servlet 'dispatcherServlet'                -> org.springframework.web.servlet.DispatcherServlet [/]
+  ```
+- Les filtres internes de Spring Security, affichés au démarrage avec
+  `logging.level.org.springframework.security.web.DefaultSecurityFilterChain=DEBUG` :
+  ```
+  Will secure any request with filters: DisableEncodeUrlFilter, WebAsyncManagerIntegrationFilter, SecurityContextHolderFilter,
+  HeaderWriterFilter, LogoutFilter, RequestCacheAwareFilter, SecurityContextHolderAwareRequestFilter,
+  AnonymousAuthenticationFilter, ExceptionTranslationFilter, AuthorizationFilter
+  ```
+- Un point d'arrêt dans n'importe quelle méthode de contrôleur. Pile réelle, lue de bas en haut et filtrée :
+  ```
+  TmpProbeExceptionsController.stack(...)                       <- ton contrôleur
+  DispatcherServlet.doDispatch(DispatcherServlet.java:963)      <- le try/catch de l'advice est ici
+  FrameworkServlet.service(FrameworkServlet.java:874)
+  ApplicationFilterChain.doFilter(...)                          <- Tomcat passe au maillon suivant
+  FilterChainProxy$VirtualFilterChain.doFilter(...)             <- fin des filtres de sécurité
+  ExceptionTranslationFilter.doFilter(ExceptionTranslationFilter.java:126)
+  ...                                                           <- les autres filtres de sécurité
+  FilterChainProxy.doFilter(FilterChainProxy.java:195)
+  DelegatingFilterProxy.doFilter(DelegatingFilterProxy.java:272) <- le filtre 'springSecurityFilterChain'
+  ApplicationFilterChain.doFilter(...)                          <- les filtres de Spring Boot
+  StandardWrapperValve.invoke(StandardWrapperValve.java:165)    <- Tomcat
+  ```
+  Tout ce qui est **sous** `DispatcherServlet.doDispatch` dans cette pile est invisible pour l'advice.
+
+**La source.** [Spring Security Architecture](https://docs.spring.io/spring-security/reference/servlet/architecture.html)
+(filtres, `DelegatingFilterProxy`, `FilterChainProxy`).
+
+### 4.2 Comment Spring trouve ton `@RestControllerAdvice`
+
+**Le mécanisme.** `@RestControllerAdvice` est méta-annotée `@ControllerAdvice`, elle-même méta-annotée `@Component` :
+`GlobalExceptionHandler` est donc trouvée par le scan comme n'importe quel bean (voir
+[02, section 4.1](02-beans-injection.md)). Rien de spécial jusque-là.
+
+Le travail se fait ensuite dans `ExceptionHandlerExceptionResolver`, un objet de Spring MVC créé au démarrage. À son
+initialisation, il demande au contexte tous les beans annotés `@ControllerAdvice`, puis, pour chacun, construit un
+`ExceptionHandlerMethodResolver` : une table "type d'exception → méthode", remplie en lisant les
+`@ExceptionHandler` de la classe **et de ses classes mères**. C'est par là que les méthodes héritées de
+`ResponseEntityExceptionHandler` entrent dans le jeu.
+
+**L'observer.** Au démarrage, avec le log `ExceptionHandlerExceptionResolver` en `DEBUG` :
+
+```
+ControllerAdvice beans: 1 @ExceptionHandler, 1 ResponseBodyAdvice
+```
+
+Le "1 @ExceptionHandler" est ton `GlobalExceptionHandler` (le second compteur concerne un autre type d'advice,
+sans rapport avec les erreurs). En interrogeant le résolveur dans un test (`getExceptionHandlerAdviceCache()`), on
+obtient bien `[globalExceptionHandler]`.
+
+**La source.** [Controller Advice](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-advice.html).
+
+### 4.3 La chaîne des `HandlerExceptionResolver`
+
+**Le mécanisme.** Quand le contrôleur lève une exception, `DispatcherServlet` l'attrape et la présente, dans
+l'ordre, à chaque `HandlerExceptionResolver` du contexte. Le premier qui renvoie un résultat gagne. Si **aucun** ne
+sait la traiter, le `DispatcherServlet` la relance, et elle sort vers Tomcat (voir 4.6).
+
+Relevé dans le contexte du projet :
+
+| Ordre | Résolveur | Rôle |
+|---|---|---|
+| 1 | `DefaultErrorAttributes` (Spring Boot, bean `errorAttributes`) | Note l'exception dans la requête pour la page `/error`, puis passe la main (ne résout rien) |
+| 2 | `ExceptionHandlerExceptionResolver` | Cherche un `@ExceptionHandler` dans le contrôleur, puis dans les advices : **c'est lui qui appelle `GlobalExceptionHandler`** |
+| 3 | `ResponseStatusExceptionResolver` | Gère les exceptions annotées `@ResponseStatus` |
+| 4 | `DefaultHandlerExceptionResolver` | Traduit les exceptions de Spring MVC en statut HTTP, avec `response.sendError`, **sans corps** |
+
+Les trois derniers sont regroupés dans un bean `handlerExceptionResolver` de type `HandlerExceptionResolverComposite`.
+
+**Pourquoi hériter de `ResponseEntityExceptionHandler` (2.6).** Sans cette classe mère, une erreur de Spring MVC
+(méthode non supportée, JSON illisible...) traverserait le niveau 2 sans trouver de handler et arriverait au niveau
+4. Vérifié en appelant directement `DefaultHandlerExceptionResolver` avec une `HttpRequestMethodNotSupportedException` :
+statut 405, message `Method 'DELETE' is not supported.`, corps **vide**. Tomcat enverrait alors la requête vers
+`/error` (4.6), qui répond dans le format de Spring Boot, sans `code`. La classe mère intercepte ces mêmes
+exceptions au niveau 2 et les transforme en `ProblemDetail`.
+
+**L'observer.** Les logs de `GET /api/tasks/999`, puis de `DELETE /api/users/1` :
+
+```
+GET "/api/tasks/999", parameters={}
+Using @ExceptionHandler com.personal.task_tracker.commons.exception.GlobalExceptionHandler#handleTaskNotFound(TaskNotFoundException)
+Resolved [com.personal.task_tracker.task.exception.TaskNotFoundException: There is no task with id: 999]
+Completed 404 NOT_FOUND
+
+DELETE "/api/users/1", parameters={}
+Using @ExceptionHandler com.personal.task_tracker.commons.exception.GlobalExceptionHandler#handleException(Exception, WebRequest)
+Request method 'DELETE' is not supported
+Resolved [org.springframework.web.HttpRequestMethodNotSupportedException: Request method 'DELETE' is not supported]
+Completed 405 METHOD_NOT_ALLOWED
+```
+
+`handleException` n'est pas écrite dans le projet : c'est la méthode unique de `ResponseEntityExceptionHandler`,
+déclarée `@ExceptionHandler` pour une vingtaine d'exceptions de Spring MVC, qui aiguille ensuite vers
+`handleHttpRequestMethodNotSupported`, `handleMethodArgumentNotValid`, etc. Les noms affichés viennent de
+`GlobalExceptionHandler#...` parce que la méthode héritée est appelée sur ton objet.
+
+**La source.** [Exceptions](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/exceptionhandlers.html)
+(la chaîne de résolveurs), [Special Bean Types](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/special-bean-types.html).
+
+### 4.4 Le choix de la méthode : "le plus proche" et le cas des causes
+
+**Le mécanisme.** Pour une exception donnée, `ExceptionHandlerMethodResolver` garde les méthodes dont le type
+déclaré est un parent (ou le type exact) de l'exception, puis prend la plus **proche** dans la hiérarchie des
+classes. C'est la règle "le plus spécifique gagne" de 2.3. Le résultat est mis en cache par type d'exception.
+
+Subtilité : s'il ne trouve **rien** pour l'exception elle-même, il recommence avec sa **cause**
+(`getCause()`), puis la cause de la cause. Mais le handler sur `Exception` correspond à tout : dans le projet, la
+recherche s'arrête toujours au premier niveau.
+
+**L'observer.** En interrogeant `new ExceptionHandlerMethodResolver(GlobalExceptionHandler.class)` dans un test :
+
+```
+resolve TaskNotFoundException -> GlobalExceptionHandler.handleTaskNotFound
+resolve NullPointerException -> GlobalExceptionHandler.handleUnexpected
+resolve IllegalStateException -> GlobalExceptionHandler.handleUnexpected           (cause : TaskNotFoundException)
+resolve HttpRequestMethodNotSupportedException -> ResponseEntityExceptionHandler.handleException
+resolve InsufficientAuthenticationException -> GlobalExceptionHandler.handleAuthentication
+resolve AccessDeniedException -> GlobalExceptionHandler.handleAccessDenied
+```
+
+Puis la même chose après avoir retiré temporairement `handleUnexpected` :
+
+```
+resolve NullPointerException -> null
+resolve IllegalStateException -> GlobalExceptionHandler.handleTaskNotFound
+```
+
+Sans le filet, une `TaskNotFoundException` **enveloppée** dans une autre exception est retrouvée par sa cause et
+donne un 404. Avec le filet, le 500 l'emporte. Retiens que la présence d'un handler sur `Exception` change le
+comportement des autres.
+
+**La source.** [Exceptions](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-exceptionhandler.html)
+(`@ExceptionHandler`, correspondance par type et par cause).
+
+### 4.5 `ProblemDetail` et RFC 9457 : ce qui est vraiment écrit
+
+**Le mécanisme.** Un handler qui renvoie `ProblemDetail` ne fait que créer un objet Java. Spring MVC le sérialise
+avec Jackson et choisit le type de contenu `application/problem+json`. Deux détails du JSON viennent d'un
+**mixin** Jackson (`ProblemDetailJacksonMixin`), une classe d'annotations que Spring applique à `ProblemDetail` sans
+le modifier :
+
+- les propriétés ajoutées avec `setProperty` sont écrites **à la racine** (`"code": ...`), et pas dans un objet
+  `"properties"` ;
+- les champs vides sont omis.
+
+Or, dans Spring Framework 7, `type` vaut `null` par défaut. Il n'apparaît donc **pas** dans la réponse. Ce n'est pas
+une erreur : la RFC 9457 précise qu'un `type` absent équivaut à `about:blank`.
+
+**L'observer.**
+
+- Corps réel de `GET /api/tasks/999` : pas de `type`.
+  ```json
+  {"detail":"There is no task with id: 999","instance":"/api/tasks/999","status":404,"title":"Not Found","code":"task.notFound"}
+  ```
+- Le même `ProblemDetail` sérialisé par un `JsonMapper` nu, puis avec le mixin (programme Java autonome, sortie
+  réelle) :
+  ```
+  getType=null
+  plain   {"detail":"x","instance":null,"properties":{"code":"task.notFound"},"status":404,"title":"Not Found","type":null}
+  mixin   {"detail":"x","status":404,"title":"Not Found","code":"task.notFound"}
+  ```
+  C'est exactement pour cela que `SecurityProblemHandler`, qui écrit sa réponse à la main, déclare le mixin sur son
+  `JsonMapper` (et que `SecurityErrorsTest` vérifie l'absence de `properties`).
+
+**Ce que Spring Boot propose à la place.** Avec `spring.mvc.problemdetails.enabled=true`, Boot déclare son propre
+`ProblemDetailsExceptionHandler`, mais seulement s'il n'existe aucun bean de type `ResponseEntityExceptionHandler`
+(`@ConditionalOnMissingBean`). Ici `GlobalExceptionHandler` en est un : la propriété serait sans effet.
+
+**La source.** [Error Responses](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html)
+(Spring MVC), [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457.html), section 3.1.1 pour `type`.
+
+### 4.6 Le dernier filet : `/error` et `BasicErrorController`
+
+**Le mécanisme.** Ce qui échappe au `DispatcherServlet` (exception sans handler, exception levée dans un filtre,
+`response.sendError`) arrive à Tomcat. Spring Boot a enregistré auprès de Tomcat une **page d'erreur** globale,
+`/error` (auto-configuration `ErrorMvcAutoConfiguration`, du module `spring-boot-webmvc`). Tomcat relance alors la
+requête en interne, en mode `ERROR`, vers `/error`, qui est servie par un contrôleur de Spring Boot,
+`BasicErrorController`. Son corps JSON est construit par `DefaultErrorAttributes` (le résolveur numéro 1 de 4.3) :
+`timestamp`, `status`, `error`, `path`. Pas de `ProblemDetail`, pas de `code`.
+
+Par défaut, le message de l'exception n'est **pas** recopié dans ce corps : même ce filet ne fait pas fuiter
+"internal secret".
+
+**L'observer.** Trois cas réels :
+
+| Cas provoqué | Réponse |
+|---|---|
+| `response.sendError(418)` dans un contrôleur de test | `418 application/json` `{"timestamp":"...","status":418,"error":"I'm a teapot","path":"/probe/exceptions/send-error"}` |
+| `IllegalStateException` levée par un filtre de test | `500 application/json` `{"timestamp":"...","status":500,"error":"Internal Server Error","path":"/probe/exceptions/filter-boom"}` |
+| `NullPointerException("internal secret")` dans un contrôleur, `handleUnexpected` retiré | `500 application/json` `{"timestamp":"...","status":500,"error":"Internal Server Error","path":"/probe/exceptions/npe"}` |
+
+Les logs du dernier cas montrent le passage par Tomcat puis la seconde traversée du `DispatcherServlet` :
+
+```
+GET "/probe/exceptions/npe", parameters={}
+Servlet.service() for servlet [dispatcherServlet] in context with path [] threw exception [Request processing failed: java.lang.NullPointerException: internal secret] with root cause
+"ERROR" dispatch for GET "/error", parameters={}
+Exiting from "ERROR" dispatch, status 500
+```
+
+Avec `handleUnexpected` en place, la même requête donne le `ProblemDetail` 500 `server.internalError` et la ligne
+`Using @ExceptionHandler ...GlobalExceptionHandler#handleUnexpected(Exception)` : `/error` n'est jamais atteint.
+
+**La source.** [Error Handling](https://docs.spring.io/spring-boot/reference/web/servlet.html#web.servlet.spring-mvc.error-handling)
+(Spring Boot).
+
+### 4.7 Pourquoi les erreurs de sécurité passent par `SecurityProblemHandler`
+
+**Le mécanisme.** Dans la liste de 4.1, `ExceptionTranslationFilter` est placé juste avant `AuthorizationFilter`.
+Son rôle : entourer **tout ce qui suit** (le filtre d'autorisation, les filtres suivants et le `DispatcherServlet`)
+d'un `try/catch`. S'il attrape une `AuthenticationException`, il appelle l'`AuthenticationEntryPoint` (401). S'il
+attrape une `AccessDeniedException`, il appelle l'`AccessDeniedHandler` (403), sauf si l'utilisateur est anonyme :
+dans ce cas il considère qu'il faut d'abord s'authentifier et appelle aussi l'entry point (401).
+
+`SecurityConfig` branche `SecurityProblemHandler` à ces deux places. Par défaut, Spring Security y mettrait ses
+propres implémentations, qui ne produisent pas le `ProblemDetail` du projet. Voilà pourquoi ce composant est
+nécessaire : quand `AuthorizationFilter` refusera une requête (avec le JWT), l'exception naîtra **sous**
+`DispatcherServlet` dans la pile, là où l'advice ne peut rien.
+
+À l'inverse, une `AccessDeniedException` levée dans un **contrôleur** est attrapée d'abord par le
+`DispatcherServlet` (niveau 2 de 4.3) : c'est `GlobalExceptionHandler.handleAccessDenied` qui répond, et
+`ExceptionTranslationFilter` ne voit rien passer. D'où les deux côtés testés par `SecurityErrorsTest`.
+
+**L'observer.**
+
+- Le branchement réel, lu par réflexion dans le filtre :
+  ```
+  security filter ExceptionTranslationFilter
+     entryPoint -> com.personal.task_tracker.commons.exception.SecurityProblemHandler
+     accessDeniedHandler -> com.personal.task_tracker.commons.exception.SecurityProblemHandler
+  ```
+- Un filtre de test, placé après les filtres de sécurité, qui lève `AccessDeniedException` pour une URL donnée.
+  Réponse : `401 application/problem+json`,
+  `{"detail":"Authentication is required","instance":"/probe/exceptions/filter-denied","status":401,"title":"Unauthorized","code":"request.unauthorized"}`.
+  Aucune ligne du `DispatcherServlet` dans les logs pour cette requête, mais, avec
+  `logging.level.org.springframework.security.web.access.ExceptionTranslationFilter=TRACE` :
+  ```
+  Sending AnonymousAuthenticationToken [Principal=anonymousUser, ..., Granted Authorities=[ROLE_ANONYMOUS]] to authentication entry point since access is denied
+  ```
+  Un 401 et non un 403, parce que l'utilisateur est anonyme. Le `instance` est présent parce que
+  `SecurityProblemHandler.write` le remplit lui-même.
+
+**La source.** [Handling Security Exceptions](https://docs.spring.io/spring-security/reference/servlet/architecture.html#servlet-exceptiontranslationfilter)
+(Spring Security).
+
+### 4.8 Le parcours complet, en une table
+
+Toutes les sorties possibles d'une exception dans le projet, vérifiées une à une :
+
+| Où naît l'exception | Qui l'attrape | Format de la réponse |
+|---|---|---|
+| Contrôleur ou service, type connu (`TaskNotFoundException`...) | `ExceptionHandlerExceptionResolver` → ton handler | `ProblemDetail` avec `code` métier |
+| Spring MVC avant ton code (405, JSON illisible, route inconnue) | `ExceptionHandlerExceptionResolver` → `handleException` hérité → `handleExceptionInternal` | `ProblemDetail` avec `code` `request.*` |
+| Contrôleur ou service, type imprévu | `ExceptionHandlerExceptionResolver` → `handleUnexpected` | `ProblemDetail` 500 `server.internalError` |
+| Filtre de sécurité (ou après lui), `AuthenticationException` / `AccessDeniedException` | `ExceptionTranslationFilter` → `SecurityProblemHandler` | `ProblemDetail` 401 / 403, écrit à la main |
+| Autre exception dans un filtre, ou `sendError` | Tomcat → `/error` → `BasicErrorController` | JSON de Spring Boot, **sans** `code` |
+
+La dernière ligne est le seul trou du format d'erreur. Elle ne concerne aujourd'hui aucun code du projet, mais un
+futur filtre maison (journalisation, limitation de débit...) qui lèverait une exception tomberait dedans.
+
+---
+
+## 5. À toi de jouer
 
 **Exercice 1 : observer les formats d'erreur.** Lance l'application et appelle :
 
@@ -391,7 +688,7 @@ mais la réponse au client n'en dit rien.
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -405,23 +702,23 @@ mais la réponse au client n'en dit rien.
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **Logging structuré** ⏳ : aujourd'hui seul `handleUnexpected` logue. En production on logue aussi les erreurs
   métier fréquentes au niveau `WARN`, avec un identifiant de requête pour retrouver le contexte.
 - **Champ `type` personnalisé** : la RFC prévoit une URI par type d'erreur, qui peut pointer vers une page de
-  documentation. Le projet garde `about:blank` et met la clé dans `code`.
+  documentation. Le projet laisse `type` vide (donc `about:blank`, section 4.5) et met la clé dans `code`.
 - **Internationalisation** ⏳ : les `code` sont prêts pour une traduction côté front, ou côté serveur avec
   `MessageSource` et l'en-tête `Accept-Language`.
 - **422 Unprocessable Content** : statut parfois préféré à 400 ou 409 pour une règle métier violée sur une requête
   bien formée.
-- **Documentation officielle** : Spring Framework Reference, sections « Exceptions » et « Error Responses » du
-  chapitre Web MVC ; Spring Security Reference, « Handling Security Exceptions » ; RFC 9457 « Problem Details for
-  HTTP APIs ».
+- **Docs officielles** : les liens de la section 4 couvrent Spring MVC (« Exceptions », « Error Responses »,
+  « Controller Advice »), Spring Boot (« Error Handling »), Spring Security (« Handling Security Exceptions ») et la
+  [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457.html).
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Pourquoi les exceptions métier héritent-elles de `RuntimeException` ?**
 

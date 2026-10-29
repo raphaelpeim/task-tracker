@@ -6,6 +6,8 @@
 - Comment les messages d'erreur sont externalisés et transformés en codes pour le front
 - Comment écrire ta propre contrainte (l'exemple de `@MaxBytes`)
 - Pourquoi on valide à la fois dans l'API et dans la base
+- Ce qui se passe vraiment derrière `@Valid` : qui déclenche la validation, quel moteur, comment `@MaxBytes` et les
+  messages sont trouvés, et ce qui casse si on retire une pièce
 
 **Prérequis** : [05. Web et REST](05-web-rest.md). Utile ensuite : [07. Exceptions](07-exceptions.md).
 
@@ -174,7 +176,8 @@ Pour `POST /api/tasks` avec `{}`, la réponse contient une erreur par champ obli
 }
 ```
 
-(les propriétés standard `type`, `title` et `instance` sont aussi présentes ; l'ordre des erreurs peut varier).
+(les propriétés standard `title` et `instance` sont aussi présentes ; `type` est omis, ce qui équivaut à
+`about:blank`, voir [07. Exceptions](07-exceptions.md) section 4.5 ; l'ordre des erreurs peut varier).
 
 `description` et `assigneeId` n'apparaissent pas : ils sont optionnels.
 
@@ -257,7 +260,323 @@ Oublier une clé fait donc échouer la suite de tests au lieu d'afficher une err
 
 ---
 
-## 4. À toi de jouer
+## 4. Sous le capot
+
+Les sections précédentes disent **ce que** fait la validation. Celle-ci montre **qui** la déclenche, **avec quoi**,
+et ce qui casse si on retire une pièce. Même plan que dans [02. Beans et injection](02-beans-injection.md) : le
+mécanisme réel, comment l'observer, la source. Les sorties citées ont été relevées sur le projet (Spring Boot
+4.1.1, Hibernate Validator 9.1.3), avec un test temporaire qui étend `IntegrationTest`.
+
+### 4.1 Trois étages : la spécification, le moteur, la colle Spring
+
+**Le mécanisme.** `spring-boot-starter-validation` n'apporte pas une bibliothèque mais trois étages, qu'on lit dans
+la liste des `.jar` du projet :
+
+| Jar | Rôle | Ce qu'il contient |
+|---|---|---|
+| `jakarta.validation-api-3.1.1` | La **spécification** : des interfaces et des annotations | `@NotBlank`, `@Size`, `@Valid`, `ConstraintValidator`, `Validator`... Aucun code qui vérifie quoi que ce soit |
+| `hibernate-validator-9.1.3.Final` | Le **moteur** : l'implémentation de la spécification | Le code de chaque contrainte, l'interpolation des messages, les messages par défaut traduits |
+| `spring-boot-validation-4.1.1` | La **colle** avec Spring | `ValidationAutoConfiguration`, qui crée les beans de validation |
+
+Comment l'API trouve-t-elle le moteur sans le connaître ? Par le mécanisme standard de Java, `ServiceLoader` : le jar
+d'Hibernate Validator contient un fichier texte `META-INF/services/jakarta.validation.spi.ValidationProvider` dont
+l'unique ligne est `org.hibernate.validator.HibernateValidator`. C'est le même principe que le fichier
+`AutoConfiguration.imports` de Spring Boot (voir [02, section 4.6](02-beans-injection.md)), mais au niveau du JDK.
+
+`ValidationAutoConfiguration` s'appuie justement sur ce fichier : elle est protégée par
+`@ConditionalOnClass(ExecutableValidator.class)` **et**
+`@ConditionalOnResource("classpath:META-INF/services/jakarta.validation.spi.ValidationProvider")`. Pas de moteur sur
+le classpath, pas d'auto-configuration. Quand elle passe, elle déclare deux beans :
+
+- `defaultValidator`, un `LocalValidatorFactoryBean` : l'adaptateur Spring autour du moteur ;
+- `methodValidationPostProcessor`, un `FilteredMethodValidationPostProcessor` (voir 4.3).
+
+**L'observer.**
+
+- Le fichier de service, depuis `server/` :
+  ```bash
+  unzip -p ~/.m2/repository/org/hibernate/validator/hibernate-validator/9.1.3.Final/hibernate-validator-9.1.3.Final.jar \
+    META-INF/services/jakarta.validation.spi.ValidationProvider
+  # org.hibernate.validator.HibernateValidator
+  ```
+- Les annotations de l'auto-configuration, sans les sources :
+  `javap -v -cp ~/.m2/repository/org/springframework/boot/spring-boot-validation/4.1.1/spring-boot-validation-4.1.1.jar org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration | grep -E 'Conditional|ValidationProvider'`.
+- Dans un test qui étend `IntegrationTest`, en demandant les beans au contexte puis en "déballant" le validateur
+  (`unwrap`). Sortie réelle :
+  ```
+  jakarta Validator bean 'defaultValidator' -> org.springframework.validation.beanvalidation.LocalValidatorFactoryBean
+  spring Validator bean 'mvcValidator' -> org.springframework.boot.validation.autoconfigure.ValidatorAdapter
+  unwrap ValidatorFactory -> org.hibernate.validator.internal.engine.ValidatorFactoryImpl
+  unwrap Validator -> org.hibernate.validator.internal.engine.ValidatorImpl
+  ```
+  Sous l'emballage Spring, c'est bien Hibernate Validator qui travaille.
+
+**Pourquoi c'est indispensable.** Avec seulement l'API, `@NotBlank` compile mais reste une étiquette : il n'existe
+aucun code pour la lire. C'est le piège "`@NonNull` ne bloque rien" de la section 6, en plus sournois.
+
+**La source.** [Java Bean Validation](https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html)
+(Spring Framework), [Validation](https://docs.spring.io/spring-boot/reference/io/validation.html) (Spring Boot),
+[Jakarta Validation 3.1](https://jakarta.ee/specifications/bean-validation/3.1/jakarta-validation-spec-3.1.html)
+(la spécification).
+
+### 4.2 Qui exécute `@Valid` sur un `@RequestBody` : un résolveur d'argument, pas un proxy
+
+**Le mécanisme.** Contrairement à `@Transactional` ([02, section 4.4](02-beans-injection.md)), `@Valid` sur un
+paramètre de contrôleur ne passe par **aucun proxy**. C'est Spring MVC lui-même qui s'en charge, au moment où il
+prépare les arguments de ta méthode :
+
+1. le `DispatcherServlet` confie la requête au `RequestMappingHandlerAdapter` ;
+2. pour chaque paramètre, un **résolveur d'argument** fabrique la valeur. Pour `@RequestBody`, c'est
+   `RequestResponseBodyMethodProcessor` : il fait convertir le JSON par Jackson, puis appelle
+   `validateIfApplicable`, qui regarde si le paramètre porte `@Valid` (ou `@Validated`) ;
+3. si oui, il crée un `DataBinder` et appelle le validateur MVC (`mvcValidator`), qui délègue à Hibernate Validator ;
+4. chaque violation devient une `FieldError` dans un `BindingResult` ;
+5. s'il y a au moins une erreur, le résolveur lève `MethodArgumentNotValidException`, avec ce `BindingResult`. Ta
+   méthode n'est jamais appelée.
+
+**L'observer.** Pose un point d'arrêt dans `MaxBytesValidator.isValid`, puis envoie une inscription avec un mot de
+passe de 40 `é`. Pile d'appels réelle, lue de bas en haut et filtrée sur les classes utiles :
+
+```
+MaxBytesValidator.isValid(MaxBytesValidator.java)
+ValidatorImpl.validate(ValidatorImpl.java:170)                                  <- Hibernate Validator
+SpringValidatorAdapter.validate(SpringValidatorAdapter.java:103)                <- l'adaptateur Spring
+ValidatorAdapter.validate(ValidatorAdapter.java:69)                             <- le mvcValidator de Spring Boot
+DataBinder.validate(DataBinder.java:1402)
+AbstractMessageConverterMethodArgumentResolver.validateIfApplicable(...:290)    <- "y a-t-il @Valid ?"
+RequestResponseBodyMethodProcessor.resolveArgument(...:163)                     <- le résolveur de @RequestBody
+InvocableHandlerMethod.getMethodArgumentValues(...:224)                         <- préparation des arguments
+RequestMappingHandlerAdapter.invokeHandlerMethod(...:934)
+DispatcherServlet.doDispatch(DispatcherServlet.java:963)
+```
+
+Aucune ligne `$$SpringCGLIB$$` : tout se passe **avant** l'appel de `AuthController.register`.
+
+**Ce qui se passe sans `@Valid`.** Vérifié avec un contrôleur de test dont le `@RequestBody` a un champ `@NotBlank`
+mais pas de `@Valid` : l'envoi de `{"name": ""}` donne un **200** et la méthode reçoit `name=''`. Le résolveur a
+converti le JSON, n'a pas trouvé `@Valid`, et n'a rien vérifié. Avec `@Valid`, la même requête donne le 400
+`validation.failed` habituel.
+
+**La source.** [Validation](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html)
+(Spring MVC), [Validation](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-config/validation.html)
+(configuration MVC).
+
+### 4.3 La validation de méthode : l'autre chemin, avec un proxy cette fois
+
+**Le mécanisme.** Hors des contrôleurs, aucun résolveur d'argument n'est là pour lire `@Valid`. Pour valider les
+paramètres d'un service, Spring utilise donc la technique de `@Transactional` : un `BeanPostProcessor` (voir
+[02, section 4.4](02-beans-injection.md)), ici le `methodValidationPostProcessor` déclaré par Spring Boot. Il
+n'enveloppe **que** les beans dont la classe porte `@Validated`. Le proxy appelle Hibernate Validator avant chaque
+méthode et lève `jakarta.validation.ConstraintViolationException` si un paramètre est invalide.
+
+Dans le projet, **aucun bean ne porte `@Validated`** : ce post-processeur existe, mais ne proxifie rien. La
+validation passe uniquement par le chemin de 4.2.
+
+**L'observer.** Dans un test, en donnant à la main au post-processeur deux petites classes, l'une avec
+`@Validated`, l'autre sans, chacune avec une méthode `greet(@NotBlank String name)`. Sortie réelle :
+
+```
+MVPP bean 'methodValidationPostProcessor' -> org.springframework.boot.validation.beanvalidation.FilteredMethodValidationPostProcessor
+@Validated after MVPP -> ...TmpProbeValidationTest$ProbeValidatedService$$SpringCGLIB$$0
+exception -> jakarta.validation.ConstraintViolationException: greet.name: ne doit pas être vide
+not @Validated after MVPP -> ...TmpProbeValidationTest$ProbeNotValidatedService
+plain call -> hello
+direct new @Validated call -> hello
+```
+
+Trois enseignements :
+
+- avec `@Validated`, l'objet rendu est une sous-classe CGLIB, et l'appel invalide est refusé ;
+- sans `@Validated`, le post-processeur rend l'objet tel quel, et `@NotBlank` est ignoré ;
+- un `new ProbeValidatedService()` hors de Spring n'a pas de proxy, donc aucune validation. Mêmes limites que
+  `@Transactional` : pas de `this.autreMethode()`, pas de méthode `private`.
+
+Le message "ne doit pas être vide" est en français : c'est le message par défaut d'Hibernate Validator, choisi selon
+la langue de la JVM (voir 4.5).
+
+**Un troisième chemin, propre aux contrôleurs.** Depuis Spring Framework 6.1, une contrainte posée **directement**
+sur un paramètre de contrôleur (`@PathVariable @Positive Long id`) est validée par Spring MVC sans proxy ni
+`@Validated`. Vérifié avec un contrôleur de test : `GET /probe/validation/-1` donne un 400, mais l'exception est
+`HandlerMethodValidationException`, pas `MethodArgumentNotValidException`. Le projet ne la personnalise pas : la
+réponse est générique (`"detail": "Validation failure"`, `"code": "request.badRequest"`), sans la liste `errors`.
+À garder en tête le jour où un contrôleur validera un paramètre de chemin.
+
+**La source.** [Spring-driven Method Validation](https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html#validation-beanvalidation-spring-method),
+[Validation](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html)
+(Spring MVC, les deux exceptions).
+
+### 4.4 Comment `@MaxBytes` est trouvé et instancié
+
+**Le mécanisme.** `MaxBytesValidator` ne porte ni `@Component` ni aucune annotation Spring, et rien ne le scanne.
+Le lien est **dans l'annotation elle-même** : `@Constraint(validatedBy = MaxBytesValidator.class)`. Voici
+l'enchaînement :
+
+1. Au premier `validate` d'un `RegisterRequestDto`, Hibernate Validator lit par réflexion les annotations de ses
+   composants. Il voit `@MaxBytes`, remarque qu'elle est elle-même annotée `@Constraint`, et lit `validatedBy`.
+   C'est pour cela que `@Retention(RUNTIME)` est obligatoire : sans elle, l'annotation disparaît à la compilation et
+   le moteur ne la voit jamais.
+2. Pour créer l'instance, il demande à une `ConstraintValidatorFactory`. Spring a remplacé celle par défaut par
+   `SpringConstraintValidatorFactory`, qui délègue à la fabrique de beans de Spring (`createBean`). Conséquence
+   pratique : un validateur maison peut recevoir des dépendances par son constructeur, comme un bean (un
+   repository, par exemple, pour vérifier une unicité).
+3. Hibernate Validator appelle `initialize(annotation)` une fois, puis garde l'instance en cache. Chaque validation
+   suivante appelle seulement `isValid`.
+
+**L'observer.** Avec un constructeur temporaire qui affiche son identité et sa pile d'appels (code restauré
+ensuite), deux inscriptions invalides successives donnent :
+
+```
+--- POST /api/auth/register (1)
+MaxBytesValidator created 433582883
+  ctor at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.createBean(...:325)
+  ctor at org.springframework.validation.beanvalidation.SpringConstraintValidatorFactory.getInstance(...:83)
+  ctor at org.hibernate.validator.internal.engine.constraintvalidation.ClassBasedValidatorDescriptor.newInstance(...:82)
+  ...
+MaxBytesValidator.isValid on 433582883
+--- POST /api/auth/register (2)
+MaxBytesValidator.isValid on 433582883
+```
+
+L'instance est créée **pendant la première requête**, pas au démarrage, puis réutilisée (même numéro). C'est pour
+cela qu'un `ConstraintValidator` ne doit garder aucun état propre à une requête dans ses champs : `max` ne change
+jamais après `initialize`, c'est sans risque. Sans modifier le code, un point d'arrêt dans `initialize` montre la
+même chose : il n'est atteint qu'à la première inscription.
+
+**La source.** [Configuring Custom Constraints](https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html#validation-beanvalidation-spring-constraints)
+(Spring), [Creating custom constraints](https://docs.hibernate.org/validator/9.1/reference/en-US/html_single/#validator-customconstraints)
+(Hibernate Validator).
+
+### 4.5 L'interpolation : de `{task.title.required}` à "Title is required"
+
+**Le mécanisme.** Transformer un gabarit de message en phrase s'appelle l'**interpolation**. Dans le projet, ce
+n'est pas un seul objet mais une chaîne de trois, relevée dans le contexte :
+
+```
+messageInterpolator -> org.springframework.validation.beanvalidation.LocaleContextMessageInterpolator
+   LocaleContextMessageInterpolator.targetInterpolator -> org.springframework.boot.validation.MessageSourceMessageInterpolator
+   MessageSourceMessageInterpolator.messageSource -> ...AnnotationConfigServletWebServerApplicationContext
+   MessageSourceMessageInterpolator.messageInterpolator -> org.hibernate.validator.messageinterpolation.ResourceBundleMessageInterpolator
+context messageSource -> org.springframework.context.support.DelegatingMessageSource
+```
+
+1. `LocaleContextMessageInterpolator` (Spring) ajoute la **langue** de la requête en cours.
+2. `MessageSourceMessageInterpolator` (Spring Boot) essaie d'abord de résoudre chaque `{clé}` dans le `MessageSource`
+   de Spring, c'est-à-dire un éventuel `messages.properties`. Le projet n'en a pas : le `MessageSource` est un
+   `DelegatingMessageSource` vide, la clé reste telle quelle.
+3. `ResourceBundleMessageInterpolator` (Hibernate Validator) cherche alors la clé dans le bundle
+   **`ValidationMessages`** à la racine du classpath (ton fichier), puis dans ses propres messages par défaut
+   (`org/hibernate/validator/ValidationMessages_xx.properties`, dans son jar). Enfin il remplace les paramètres
+   comme `{max}` par les attributs de l'annotation.
+
+Le nom `ValidationMessages.properties` n'est donc pas une convention du projet : c'est le nom imposé par la
+spécification. Renomme-le et toutes les réponses afficheraient `{task.title.required}`, accolades comprises.
+`GlobalExceptionHandler` relit d'ailleurs le même fichier avec `ResourceBundle.getBundle("ValidationMessages")`
+pour les clés `invalidFormat`, qui ne passent pas par Bean Validation.
+
+**L'observer.**
+
+- Les messages par défaut et leurs traductions :
+  `unzip -l ~/.m2/repository/org/hibernate/validator/hibernate-validator/9.1.3.Final/hibernate-validator-9.1.3.Final.jar | grep ValidationMessages`
+  liste une trentaine de langues, dont `ValidationMessages_fr.properties`.
+- D'où le français de 4.3 : appelé hors requête HTTP, le validateur prend la langue de la JVM (ici `fr`), et
+  `@NotBlank` sans `message` donne "ne doit pas être vide". Les messages du projet, eux, n'existent qu'en anglais :
+  quelle que soit la langue, c'est la phrase anglaise qui sort.
+
+**La source.** [Interpolating constraint error messages](https://docs.hibernate.org/validator/9.1/reference/en-US/html_single/#section-message-interpolation)
+(Hibernate Validator).
+
+### 4.6 L'exception levée et son trajet
+
+**Le mécanisme.** Selon le chemin, l'erreur n'a pas la même forme :
+
+| Chemin | Exception | Qui la traduit dans le projet | Réponse |
+|---|---|---|---|
+| `@Valid @RequestBody` (4.2) | `MethodArgumentNotValidException` | `GlobalExceptionHandler.handleMethodArgumentNotValid` | 400 `validation.failed`, avec `errors` |
+| Contrainte sur un paramètre de contrôleur (4.3) | `HandlerMethodValidationException` | La classe mère `ResponseEntityExceptionHandler` | 400 `request.badRequest`, sans `errors` |
+| Bean `@Validated` (4.3) | `ConstraintViolationException` | Personne de dédié : `handleUnexpected` | 500 `server.internalError` |
+
+La dernière ligne se déduit de la liste des exceptions gérées par `ResponseEntityExceptionHandler`
+(`ConstraintViolationException` n'y figure pas) : si un jour un service porte `@Validated`, il faudra ajouter un
+handler, sinon une donnée invalide finira en 500.
+
+Le trajet de `MethodArgumentNotValidException` est celui de toute exception de contrôleur : elle remonte au
+`DispatcherServlet`, qui la confie à `ExceptionHandlerExceptionResolver`, qui trouve la méthode
+`handleException` héritée de `ResponseEntityExceptionHandler`, laquelle aiguille vers ta surcharge
+`handleMethodArgumentNotValid`. Détails dans [07. Exceptions](07-exceptions.md), section 4.
+
+**L'observer.** Avec `logging.level.org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver=DEBUG`,
+pour `POST /api/tasks` avec `{}` :
+
+```
+Using @ExceptionHandler com.personal.task_tracker.commons.exception.GlobalExceptionHandler#handleException(Exception, WebRequest)
+Resolved [org.springframework.web.bind.MethodArgumentNotValidException: Validation failed for argument [0] in public ... TaskController.createTask(...)
+Completed 400 BAD_REQUEST
+```
+
+**La source.** [Error Responses](https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html)
+(Spring MVC).
+
+### 4.7 Le refaire toi-même : valider sans Spring
+
+Pour voir qu'il n'y a pas de magie Spring dans la vérification elle-même, valide un DTO du projet avec la seule API
+Jakarta. Crée ce fichier **hors du projet** (par exemple `~/mini-validation/MiniValidation.java`) :
+
+```java
+import com.personal.task_tracker.auth.dto.RegisterRequestDto;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import jakarta.validation.ValidatorFactory;
+
+public class MiniValidation {
+
+	public static void main(String[] args) {
+		try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {   // ServiceLoader trouve Hibernate Validator
+			Validator validator = factory.getValidator();
+			System.out.println(factory.getClass().getName());
+
+			RegisterRequestDto dto = new RegisterRequestDto("", "Doe", "jdoe", "pas-un-email", "é".repeat(40));
+			for (ConstraintViolation<RegisterRequestDto> v : validator.validate(dto)) {
+				System.out.println(v.getPropertyPath() + " | " + v.getMessageTemplate() + " | " + v.getMessage());
+			}
+		}
+	}
+}
+```
+
+Lance-le depuis `server/`, avec les classes compilées du projet et ses dépendances :
+
+```bash
+./mvnw -q compile dependency:build-classpath -Dmdep.outputFile=/tmp/cp.txt
+java -cp "target/classes:$(cat /tmp/cp.txt)" ~/mini-validation/MiniValidation.java
+```
+
+Sortie réelle (l'ordre des lignes peut varier) :
+
+```
+org.hibernate.validator.internal.engine.ValidatorFactoryImpl
+firstname | {user.firstname.required} | Firstname is required
+password | {user.password.invalidSize} | Password must contain at least 8 characters and at most 72 bytes
+email | {user.email.invalidFormat} | Email is not a valid email address
+```
+
+Tout y est : le moteur trouvé par `ServiceLoader` (4.1), `@MaxBytes` découvert seul (4.4), les messages lus dans
+`ValidationMessages.properties` (4.5). Ce que Spring ajoute par-dessus : le déclenchement automatique par `@Valid`
+(4.2), la transformation en `MethodArgumentNotValidException` puis en `ProblemDetail` (4.6), et l'injection dans
+les validateurs maison.
+
+**Expérience de suppression.** Relance l'application (ou un test) avec
+`-Dspring.autoconfigure.exclude=org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration`.
+Résultat vérifié : `POST /api/tasks` avec `{}` renvoie **toujours** le 400 complet, mais les beans
+`defaultValidator` et `methodValidationPostProcessor` ont disparu. Explication : quand aucun validateur n'existe
+dans le contexte, le `mvcValidator` (un `ValidatorAdapter`, déclaré par l'auto-configuration Web MVC) s'en
+fabrique un. L'auto-configuration n'est donc pas ce qui fait
+marcher `@Valid` dans les contrôleurs ; c'est la présence d'Hibernate Validator sur le classpath. Ce qu'elle
+apporte, c'est un validateur partagé dans le contexte et la validation de méthode de 4.3.
+
+---
+
+## 5. À toi de jouer
 
 1. **Observer la règle « une erreur par champ ».** Envoie `POST /api/tasks` avec un titre composé de 60 espaces et
    des valeurs valides pour le reste. **À observer** : une seule erreur sur `#/title`, de code `task.title.required`,
@@ -276,7 +595,7 @@ Oublier une clé fait donc échouer la suite de tests au lieu d'afficher une err
 
 ---
 
-## 5. Pièges fréquents
+## 6. Pièges fréquents
 
 | Symptôme | Cause | Solution |
 |---|---|---|
@@ -290,21 +609,23 @@ Oublier une clé fait donc échouer la suite de tests au lieu d'afficher une err
 
 ---
 
-## 6. Pour aller plus loin
+## 7. Pour aller plus loin
 
 - **Validation en dehors des controllers** : `@Validated` sur un bean Spring permet de valider les paramètres de ses
-  méthodes (utile pour `@ConfigurationProperties`, voir [03. Configuration](03-configuration.md)).
+  méthodes, grâce à un proxy (section 4.3). Sur une classe `@ConfigurationProperties`, le même `@Validated` sert à
+  autre chose : valider la configuration au démarrage (voir [03. Configuration](03-configuration.md)).
 - **Groupes de validation** : appliquer des règles différentes selon le contexte (création, modification).
 - **Contraintes de classe** : vérifier une règle entre plusieurs champs (« date de fin après date de début »).
 - **`@Valid` en cascade** : valider aussi un objet imbriqué dans le DTO.
 - **Internationalisation** ⏳ : des fichiers `ValidationMessages_fr.properties` donneraient des phrases en français ;
   ici le choix est de laisser la traduction au front grâce au `code`.
-- Documentation : *Jakarta Bean Validation specification* ; *Hibernate Validator Reference Guide* (liste complète
-  des contraintes, interpolation des messages) ; *Spring Framework Reference*, « Validation ».
+- **Docs officielles** : en plus des liens de la section 4, le
+  [Hibernate Validator Reference Guide](https://docs.hibernate.org/validator/9.1/reference/en-US/html_single/) pour la
+  liste complète des contraintes.
 
 ---
 
-## 7. Quiz
+## 8. Quiz
 
 **1. Un champ porte uniquement `@Size(max = 255)`. Le client ne l'envoie pas. Que se passe-t-il ?**
 <details><summary>Réponse</summary>
