@@ -70,6 +70,39 @@ public ResponseEntity<...> createTask(@Valid @RequestBody TaskRequestDto taskDto
 Si au moins une contrainte échoue, la méthode du controller **n'est pas appelée**. Spring lève
 `MethodArgumentNotValidException`, qui contient toutes les erreurs, champ par champ.
 
+**Pourquoi `@Valid` est dans le controller et pas dans le DTO.** Les deux n'ont pas le même rôle :
+
+- le **DTO dit ce qui est valide** (`@NotBlank`, `@Size`...) : ce sont des métadonnées, pas de la logique ;
+- l'**appelant décide quand valider**. Le même DTO peut être construit dans un test, un mapper ou un service sans
+  qu'on veuille le valider à chaque fois. C'est le point d'entrée HTTP, la frontière avec les données non fiables,
+  qui demande la validation.
+
+**`@Valid` sur un champ : la cascade.** On trouve quand même `@Valid` dans un DTO, mais sur un **champ** qui
+contient un autre objet, pour que la validation descende dedans :
+
+```java
+public record CreateProjectDto(
+		@NotBlank String name,
+		@Valid @NotNull OwnerDto owner   // sans @Valid, les contraintes d'OwnerDto sont ignorées
+) {
+}
+```
+
+La même règle vaut pour une classe `@ConfigurationProperties` qui contiendrait un sous-objet.
+
+**`@Valid` ou `@Validated` ?** Les deux déclenchent la validation, mais ne viennent pas du même endroit :
+
+| | `@Valid` | `@Validated` |
+|---|---|---|
+| Origine | Standard Jakarta Bean Validation | Spécifique à Spring |
+| Groupes de validation | Non | Oui (`@Validated(OnCreate.class)`) |
+| Cascade sur un objet imbriqué (sur un champ) | Oui | Non |
+| Sur une classe : active la validation gérée par Spring (config properties, paramètres de méthodes d'un `@Service`) | Non | Oui |
+
+Devant un `@RequestBody`, les deux fonctionnent : on prend `@Valid` par convention, sauf besoin de groupes.
+`@Validated` sur `JwtProperties` sert à autre chose : faire valider la configuration au démarrage (voir
+[03. Configuration](03-configuration.md), section 2.6, et [14. JWT](14-jwt.md), section 11.3).
+
 ### 2.3 Messages externalisés
 
 Chaque contrainte a un `message`. Il peut être une phrase en dur, ou une **clé entre accolades** qui renvoie au

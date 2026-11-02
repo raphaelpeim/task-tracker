@@ -57,6 +57,54 @@ Par défaut, un bean est un **singleton** : une seule instance pour toute l'appl
 requêtes HTTP, qui arrivent en parallèle sur plusieurs threads. Règle qui en découle : **un bean ne garde pas
 d'état propre à une requête** dans ses champs. Ses champs sont ses dépendances, marquées `final`.
 
+```java
+@Service
+public class TaskService {
+	private User currentUser;   // BUG : partagé entre tous les utilisateurs
+
+	public void handle(User user) {
+		this.currentUser = user; // une autre requête peut l'écraser au même moment
+	}
+}
+```
+
+Les données d'une requête passent en **paramètres de méthode** ou restent dans des **variables locales**.
+
+**Ce qui fait un bean.** La définition de la doc Spring : *un objet instancié, assemblé et géré par le conteneur
+Spring*. Tout objet inscrit dans le contexte est un bean, quelle que soit la façon dont il y est entré
+(stéréotype, méthode `@Bean`, scan des `@ConfigurationProperties`, repository Spring Data, auto-configuration).
+Ce n'est pas la forme de la classe qui compte, c'est son inscription dans le contexte.
+
+**Bean Spring et JavaBean : deux notions sans rapport.** Elles portent le même nom par accident historique.
+
+- Un **JavaBean** est une **convention d'écriture** : constructeur sans argument, champs privés, getters et
+  setters. Elle concerne la forme du code.
+- Un **bean Spring** est un **objet géré par le conteneur**. N'importe quel objet peut en être un.
+
+| Objet | JavaBean ? | Bean Spring ? |
+|---|---|---|
+| Un `UserDto` créé avec `new` dans un controller | Oui | **Non**, Spring ne le connaît pas |
+| `JwtProperties` (record, sans setters) | Non | **Oui**, grâce à `@ConfigurationPropertiesScan` |
+| `NimbusJwtDecoder` (logique crypto, aucun getter/setter) | Non | **Oui**, grâce au `@Bean` de `JwtConfig` |
+| `UserService` annoté `@Service` | Non | **Oui** |
+
+Le nom vient des débuts de Spring : on configurait tout en XML avec des balises `<bean>`, et les objets gérés
+étaient des JavaBeans remplis par leurs setters. Le nom est resté, le lien a disparu. À retenir : **un JavaBean est
+une façon d'écrire une classe, un bean Spring est un objet que Spring gère.**
+
+**Objets de service et objets de données.** Les deux sont des objets au sens POO, c'est leur rôle qui diffère :
+
+| | Objets de service | Objets de données |
+|---|---|---|
+| Ce qu'ils portent | du **comportement** ("créer une tâche", "vérifier un token") | de l'**état** (un utilisateur, une tâche, un body de requête) |
+| Leurs champs | d'autres beans ou de la config, fixés une fois pour toutes | les données elles-mêmes |
+| Combien d'instances | une seule (singleton), créée au démarrage | autant qu'il en faut (`new`, désérialisation JSON, JPA) |
+| Exemples | controllers, services, repositories, configs, `JwtEncoder` | DTO, records, entités |
+| Bean Spring ? | Oui | **Jamais** |
+
+Un bean est un objet qui **fait** quelque chose, un DTO un objet qui **contient** quelque chose. Les entités
+`@Entity` ne sont pas des beans non plus : elles sont gérées par JPA/Hibernate, un autre mécanisme.
+
 ### 2.2 Déclarer un bean : deux manières
 
 **a) Annoter la classe (stéréotypes)**
@@ -83,6 +131,32 @@ public class MaConfig {
 	}
 }
 ```
+
+Au démarrage, Spring instancie la classe `@Configuration` (elle-même un bean, donc injectable), appelle chaque
+méthode `@Bean` **une seule fois** et enregistre l'objet retourné sous le type de retour de la méthode. On
+n'appelle jamais ces méthodes soi-même : on demande le bean par son type, par injection. Une méthode `private`
+sans `@Bean` (comme `secretKey()` dans `JwtConfig`) n'est qu'un utilitaire interne, pas un bean.
+
+**Quand passer par une `@Configuration` plutôt qu'un stéréotype :**
+
+| Situation | Exemple |
+|---|---|
+| La classe vient d'une librairie, tu ne peux pas l'annoter | `NimbusJwtEncoder`, `NimbusJwtDecoder` |
+| La construction demande de la logique | décoder le secret Base64, choisir HS256, ajouter le validateur d'émetteur |
+| Tu veux exposer une **interface** et choisir l'implémentation | le bean est un `JwtDecoder` ; passer en RSA ne changerait rien pour ceux qui l'injectent |
+| Plusieurs beans du même type avec des réglages différents | deux `RestClient` vers deux APIs différentes |
+| Remplacer un bean par défaut de Spring Boot | déclarer sa propre `SecurityFilterChain` |
+
+Règle simple : **pour tes propres classes, un stéréotype ; pour les objets à construire toi-même, une
+`@Configuration` avec `@Bean`.**
+
+**Les autres portes d'entrée**, sans rien déclarer toi-même :
+
+- `@ConfigurationPropertiesScan` enregistre les classes `@ConfigurationProperties` (voir
+  [03. Configuration](03-configuration.md), section 2.6) ;
+- Spring Data génère l'implémentation des interfaces de repository (section 4.5) ;
+- les auto-configurations de Spring Boot créent des beans selon les starters présents (section 2.6). En interne,
+  ce sont elles aussi des classes `@Configuration`, situées dans les librairies.
 
 ### 2.3 Trouver les beans : le component scan
 
@@ -114,6 +188,20 @@ Trois styles existent :
 | Setter | `@Autowired void setRepository(...)` | Rare, pour une dépendance optionnelle |
 
 Avec un **seul** constructeur, l'annotation `@Autowired` est inutile.
+
+**Pourquoi passer les beans par le constructeur ?** Ce n'est pas parce qu'ils changent : au contraire, ils sont
+**constants** (une instance créée au démarrage, rangée dans un champ `final`). Le constructeur sert à **déclarer
+les besoins** de la classe : elle ne fabrique pas ses dépendances, elle les **reçoit**. Sans injection,
+`TokenService` devrait construire lui-même son encoder, et donc savoir où trouver le secret et comment le décoder.
+
+| Avantage | Concrètement |
+|---|---|
+| Séparation des responsabilités | `TokenService` ne sait pas comment on construit un `JwtEncoder` : c'est le rôle de `JwtConfig` |
+| Une seule instance partagée | tous ceux qui demandent un `JwtEncoder` reçoivent le même, on ne recrée pas un objet coûteux |
+| Testabilité | `new TokenService(fauxEncoder)` dans un test unitaire, sans démarrer Spring |
+| Implémentations interchangeables | `TokenService` dépend de l'interface `JwtEncoder`, pas de `NimbusJwtEncoder` |
+
+C'est l'inversion de contrôle de la section 1, vue depuis une classe : d'où le nom de "conteneur IoC" dans la doc.
 
 ### 2.5 Injecter une interface
 

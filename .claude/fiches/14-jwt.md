@@ -194,6 +194,11 @@ Points à retenir :
 - Le **même** `SecretKey` sert à signer et à vérifier (c'est le principe de HS256).
 - Le décodeur vérifie automatiquement la signature et l'expiration. On ajoute la vérification de l'émetteur.
 - Dès qu'un bean `JwtDecoder` existe, Spring Security sait valider les tokens entrants.
+- On n'appelle jamais `jwtEncoder()` ni `jwtDecoder()` soi-même. L'encoder est **injecté** dans `TokenService`
+  (section 4.4) ; le decoder est trouvé tout seul par Spring Security quand `SecurityConfig` active
+  `oauth2ResourceServer(... jwt ...)` (section 5).
+- Côté encoder, le header du token doit nommer HS256 (`JwsHeader.with(MacAlgorithm.HS256)`) : par défaut,
+  `NimbusJwtEncoder` part sur RS256 et l'encodage échoue avec une clé HMAC (section 4.4).
 
 ---
 

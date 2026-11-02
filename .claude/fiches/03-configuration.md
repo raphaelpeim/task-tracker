@@ -146,6 +146,22 @@ public record JwtProperties(@NotBlank String issuer, @NotNull Duration expiratio
 Il faut l'activer, par exemple avec `@ConfigurationPropertiesScan` sur la classe principale (c'est ce que fait le
 projet, `TaskTrackerApplication.java:8`). C'est le choix recommandé dès qu'il y a plus d'une ou deux valeurs.
 
+**Trois annotations, trois rôles :**
+
+- `@ConfigurationProperties` décrit **comment** remplir l'objet depuis la configuration. Seule, elle ne crée
+  **aucun** bean : l'injection échoue avec `No qualifying bean of type 'JwtProperties'`.
+- `@ConfigurationPropertiesScan` fait que Spring **trouve** l'objet et l'enregistre comme bean. Elle parcourt le
+  package de la classe annotée et ses sous-packages, comme `@ComponentScan`.
+- `@Validated` vérifie que l'objet est **correct** au démarrage.
+
+**Les façons d'enregistrer une classe `@ConfigurationProperties` :**
+
+| Méthode | Quand l'utiliser |
+|---|---|
+| `@ConfigurationPropertiesScan` (choix du projet) | Une seule ligne, toutes les classes de config sont prises automatiquement. Idéal dans une application |
+| `@EnableConfigurationProperties(JwtProperties.class)` sur une `@Configuration` | Liste explicite. Plutôt dans les librairies et les auto-configurations, pour contrôler précisément ce qui est activé |
+| `@Component` sur la classe | Fonctionne avec une classe mutable (setters). **À éviter avec un record** : Spring traiterait `String secret` comme une dépendance à injecter et échouerait |
+
 ### 2.7 Les secrets
 
 - Jamais de mot de passe, clé ou jeton dans un fichier versionné, ni dans le code.
