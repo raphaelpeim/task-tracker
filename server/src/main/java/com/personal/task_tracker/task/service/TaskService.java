@@ -28,26 +28,6 @@ public class TaskService {
 	}
 
 	/**
-	 * Get all tasks
-	 *
-	 * @return all tasks, sorted by id
-	 */
-	public List<TaskResponseDto> getAllTasks() {
-		return repository.findAll(Sort.by("id")).stream().map(TaskMapper::toTaskResponseDto).toList();
-	}
-
-	/**
-	 * Get task by id
-	 *
-	 * @param taskId id of the task
-	 * @return the corresponding task
-	 * @throws TaskNotFoundException error thrown if no tasks found
-	 */
-	public TaskResponseDto getTaskById(Long taskId) {
-		return TaskMapper.toTaskResponseDto(findTaskById(taskId));
-	}
-
-	/**
 	 * Create a task
 	 *
 	 * @param taskDto task to create data
@@ -66,6 +46,26 @@ public class TaskService {
 		Task createdTask = repository.save(task);
 
 		return TaskMapper.toTaskResponseDto(createdTask);
+	}
+
+	/**
+	 * Get all tasks
+	 *
+	 * @return all tasks, sorted by id
+	 */
+	public List<TaskResponseDto> getAllTasks() {
+		return repository.findAll(Sort.by("id")).stream().map(TaskMapper::toTaskResponseDto).toList();
+	}
+
+	/**
+	 * Get task by id
+	 *
+	 * @param taskId id of the task
+	 * @return the corresponding task
+	 * @throws TaskNotFoundException error thrown if no tasks found
+	 */
+	public TaskResponseDto getTask(Long taskId) {
+		return TaskMapper.toTaskResponseDto(findTaskById(taskId));
 	}
 
 	/**

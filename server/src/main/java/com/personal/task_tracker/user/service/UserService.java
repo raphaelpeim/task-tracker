@@ -1,6 +1,5 @@
 package com.personal.task_tracker.user.service;
 
-import com.personal.task_tracker.auth.dto.LoginRequestDto;
 import com.personal.task_tracker.user.dto.UserCreateDto;
 import com.personal.task_tracker.user.dto.UserResponseDto;
 import com.personal.task_tracker.user.entity.AppUser;
@@ -11,6 +10,7 @@ import com.personal.task_tracker.user.repository.UserRepository;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Sort;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,29 +31,6 @@ public class UserService {
 	public UserService(UserRepository repository, PasswordEncoder passwordEncoder) {
 		this.repository = repository;
 		this.passwordEncoder = passwordEncoder;
-	}
-
-	/**
-	 * Get all users
-	 *
-	 * @return All users, sorted by lastname, firstname and username
-	 */
-	public List<UserResponseDto> getAllUsers() {
-		return repository.findAll(Sort.by("lastname", "firstname", "username")).stream()
-				.map(UserMapper::toUserResponseDto)
-				.toList();
-	}
-
-	/**
-	 * Get a user by its id
-	 *
-	 * @param userId the user id
-	 * @return The corresponding user
-	 * @throws UserNotFoundException error thrown if there is no user with the id
-	 */
-	public UserResponseDto getUserById(Long userId) {
-		AppUser user = findUserById(userId);
-		return UserMapper.toUserResponseDto(user);
 	}
 
 	/**
@@ -93,11 +70,26 @@ public class UserService {
 	}
 
 	/**
-	 * Check credentials and create the token
-	 * @param userDto credentials
+	 * Get all users
+	 *
+	 * @return All users, sorted by lastname, firstname and username
 	 */
-	public void login(LoginRequestDto userDto) {
+	public List<UserResponseDto> getAllUsers() {
+		return repository.findAll(Sort.by("lastname", "firstname", "username")).stream()
+				.map(UserMapper::toUserResponseDto)
+				.toList();
+	}
 
+	/**
+	 * Get a user by its id
+	 *
+	 * @param userId the user id
+	 * @return The corresponding user
+	 * @throws UserNotFoundException error thrown if there is no user with the id
+	 */
+	public UserResponseDto getUser(Long userId) {
+		AppUser user = findUserById(userId);
+		return UserMapper.toUserResponseDto(user);
 	}
 
 	/**
@@ -109,5 +101,20 @@ public class UserService {
 	 */
 	public AppUser findUserById(Long userId) {
 		return repository.findById(userId).orElseThrow(() -> new UserNotFoundException("There is no user with id: " + userId));
+	}
+
+	/**
+	 * Check credentials and create the token
+	 *
+	 * @param email credentials
+	 * @param rawPassword the password sent by the client
+	 * @return the authenticated user
+	 * @throws BadCredentialsException if the email is unknown or the password is wrong
+	 */
+	public AppUser login(String email, String rawPassword) {
+		String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
+		return repository.findByEmail(normalizedEmail)
+				.filter(user -> passwordEncoder.matches(rawPassword, user.getPassword()))
+				.orElseThrow(() -> new BadCredentialsException("Bad credentials"));
 	}
 }

@@ -1,12 +1,14 @@
 package com.personal.task_tracker.auth.controller;
 
 import com.personal.task_tracker.auth.dto.LoginRequestDto;
+import com.personal.task_tracker.auth.dto.LoginResponseDto;
 import com.personal.task_tracker.auth.dto.RegisterRequestDto;
 import com.personal.task_tracker.auth.dto.RegisterResponseDto;
 import com.personal.task_tracker.auth.service.AuthService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -32,11 +34,11 @@ public class AuthController {
 		return new ResponseEntity<>(registerResponseDto, HttpStatus.CREATED);
 	}
 
-//	@PostMapping("/login")
-//	public ResponseEntity<Object> login(
-//			@RequestBody @Valid LoginRequestDto userDto
-//	) {
-//		service.login(userDto);
-//		return new ResponseEntity<>(HttpStatus.OK);
-//	}
+	@PostMapping("/login")
+	public ResponseEntity<LoginResponseDto> login(
+			@RequestBody @Valid LoginRequestDto loginDto
+	) {
+		LoginResponseDto authenticatedLoginDto = service.login(loginDto);
+		return new ResponseEntity<>(authenticatedLoginDto, HttpStatus.OK);
+	}
 }

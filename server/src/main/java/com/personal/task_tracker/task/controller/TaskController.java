@@ -20,6 +20,14 @@ public class TaskController {
 		this.taskService = taskService;
 	}
 
+	@PostMapping
+	public ResponseEntity<TaskResponseDto> createTask(
+			@Valid @RequestBody TaskRequestDto taskDto
+	) {
+		TaskResponseDto createdTaskDto = taskService.createTask(taskDto);
+		return new ResponseEntity<>(createdTaskDto, HttpStatus.CREATED);
+	}
+
 	@GetMapping
 	public ResponseEntity<List<TaskResponseDto>> getAllTasks() {
 		List<TaskResponseDto> tasksDto = taskService.getAllTasks();
@@ -30,16 +38,8 @@ public class TaskController {
 	public ResponseEntity<TaskResponseDto> getTask(
 			@PathVariable Long taskId
 	) {
-		TaskResponseDto taskDto = taskService.getTaskById(taskId);
+		TaskResponseDto taskDto = taskService.getTask(taskId);
 		return new ResponseEntity<>(taskDto, HttpStatus.OK);
-	}
-
-	@PostMapping
-	public ResponseEntity<TaskResponseDto> createTask(
-			@Valid @RequestBody TaskRequestDto taskDto
-	) {
-		TaskResponseDto createdTaskDto = taskService.createTask(taskDto);
-		return new ResponseEntity<>(createdTaskDto, HttpStatus.CREATED);
 	}
 
 	@PutMapping("/{taskId}")
