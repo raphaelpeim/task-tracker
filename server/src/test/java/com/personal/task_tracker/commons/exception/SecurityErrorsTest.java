@@ -14,8 +14,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
- * Security is still disabled (permitAll), so the security exceptions are raised by SecurityErrorsTestController,
- * and the filter side is checked by calling SecurityProblemHandler directly.
+ * The security exceptions raised in a controller are raised by SecurityErrorsTestController (the requests carry the
+ * default valid token), and the filter side is checked by calling SecurityProblemHandler directly.
+ * The 401 written by the filters for a real request is covered by JwtAuthenticationTest.
  */
 class SecurityErrorsTest extends IntegrationTest {
 

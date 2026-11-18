@@ -10,12 +10,12 @@ import com.personal.task_tracker.user.repository.UserRepository;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Sort;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 @Service
 @Transactional(readOnly = true)
@@ -25,11 +25,9 @@ public class UserService {
 	private static final String EMAIL_UNIQUE_CONSTRAINT = "app_user_email_key";
 
 	private final UserRepository repository;
-	private final PasswordEncoder passwordEncoder;
 
-	public UserService(UserRepository repository, PasswordEncoder passwordEncoder) {
+	public UserService(UserRepository repository) {
 		this.repository = repository;
-		this.passwordEncoder = passwordEncoder;
 	}
 
 	/**
@@ -40,7 +38,7 @@ public class UserService {
 	 * @throws UserAlreadyExistsException if the username (case-insensitive) or the email is already used
 	 */
 	@Transactional
-	public AppUser createUser(UserCreateDto userDto) {
+	public AppUser createUser(UserCreateDto userDto, String passwordHash) {
 		String username = userDto.username().trim();
 		String email = userDto.email().trim().toLowerCase(Locale.ROOT);
 
@@ -51,7 +49,6 @@ public class UserService {
 			throw UserAlreadyExistsException.email();
 		}
 
-		String passwordHash = passwordEncoder.encode(userDto.rawPassword());
 		AppUser user = UserMapper.toEntity(userDto, username, email, passwordHash);
 
 		try {
@@ -100,5 +97,16 @@ public class UserService {
 	 */
 	public AppUser findUserById(Long userId) {
 		return repository.findById(userId).orElseThrow(() -> new UserNotFoundException("There is no user with id: " + userId));
+	}
+
+	/**
+	 * Find a user by its email without exception
+	 *
+	 * @param email the email sent by the client, in any case
+	 * @return the email corresponding user
+	 */
+	public Optional<AppUser> findUserByEmail(String email) {
+		String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
+		return repository.findByEmail(normalizedEmail);
 	}
 }

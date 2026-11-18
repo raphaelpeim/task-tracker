@@ -8,6 +8,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.converter.json.ProblemDetailJacksonMixin;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.stereotype.Component;
@@ -30,17 +31,11 @@ public class SecurityProblemHandler implements AuthenticationEntryPoint, AccessD
 			.addMixIn(ProblemDetail.class, ProblemDetailJacksonMixin.class)
 			.build();
 
-	@Override
-	public void commence(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull AuthenticationException ex)
-			throws IOException {
-		write(request, response, GlobalExceptionHandler.unauthorized());
-	}
-
-	@Override
-	public void handle(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull AccessDeniedException ex)
-			throws IOException {
-		write(request, response, GlobalExceptionHandler.forbidden());
-	}
+	/**
+	 * Sets the 401 status and the WWW-Authenticate header required by RFC 9110 (Bearer challenge of RFC 6750),
+	 * without writing any body
+	 */
+	private static final BearerTokenAuthenticationEntryPoint BEARER_ENTRY_POINT = new BearerTokenAuthenticationEntryPoint();
 
 	private static void write(HttpServletRequest request, HttpServletResponse response, ProblemDetail problem)
 			throws IOException {
@@ -48,5 +43,18 @@ public class SecurityProblemHandler implements AuthenticationEntryPoint, AccessD
 		response.setStatus(problem.getStatus());
 		response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
 		MAPPER.writeValue(response.getOutputStream(), problem);
+	}
+
+	@Override
+	public void commence(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull AuthenticationException ex)
+			throws IOException {
+		BEARER_ENTRY_POINT.commence(request, response, ex);
+		write(request, response, GlobalExceptionHandler.unauthorized());
+	}
+
+	@Override
+	public void handle(@NonNull HttpServletRequest request, @NonNull HttpServletResponse response, @NonNull AccessDeniedException ex)
+			throws IOException {
+		write(request, response, GlobalExceptionHandler.forbidden());
 	}
 }

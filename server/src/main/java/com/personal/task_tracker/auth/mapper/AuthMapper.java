@@ -26,8 +26,7 @@ public class AuthMapper {
 				registerRequestDto.firstname(),
 				registerRequestDto.lastname(),
 				registerRequestDto.username(),
-				registerRequestDto.email(),
-				registerRequestDto.password()
+				registerRequestDto.email()
 		);
 	}
 }

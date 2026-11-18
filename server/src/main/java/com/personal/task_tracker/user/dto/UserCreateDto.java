@@ -6,15 +6,13 @@ public record UserCreateDto(
 		String firstname,
 		String lastname,
 		String username,
-		String email,
-		String rawPassword
+		String email
 ) {
 	@Override
 	public @NonNull String toString() {
 		return "UserCreateDto[firstname=" + firstname
 				+ ", lastname=" + lastname
 				+ ", username=" + username
-				+ ", email=" + email
-				+ ", rawPassword=***]";
+				+ ", email=" + email + "]";
 	}
 }
